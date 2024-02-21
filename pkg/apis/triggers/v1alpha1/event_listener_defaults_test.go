@@ -21,9 +21,12 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/tektoncd/triggers/pkg/apis/config"
+	"github.com/tektoncd/triggers/pkg/apis/triggers/contexts"
 	"github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	duckv1 "knative.dev/pkg/apis/duck/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	logtesting "knative.dev/pkg/logging/testing"
 	"knative.dev/pkg/ptr"
 )
 
@@ -54,9 +57,10 @@ func TestEventListenerSetDefaults(t *testing.T) {
 				}},
 			},
 		},
-		wc: v1alpha1.WithUpgradeViaDefaulting,
+		wc: contexts.WithUpgradeViaDefaulting,
 		want: &v1alpha1.EventListener{
 			Spec: v1alpha1.EventListenerSpec{
+				ServiceAccountName: config.DefaultServiceAccountValue,
 				Triggers: []v1alpha1.EventListenerTrigger{{
 					Bindings: []*v1alpha1.EventListenerBinding{
 						{
@@ -76,23 +80,6 @@ func TestEventListenerSetDefaults(t *testing.T) {
 			},
 		},
 	}, {
-		name: "set replicas to 1 if provided deprecated replicas is 0 as part of eventlistener spec",
-		in: &v1alpha1.EventListener{
-			Spec: v1alpha1.EventListenerSpec{
-				DeprecatedReplicas: ptr.Int32(0),
-			},
-		},
-		wc: v1alpha1.WithUpgradeViaDefaulting,
-		want: &v1alpha1.EventListener{
-			Spec: v1alpha1.EventListenerSpec{
-				Resources: v1alpha1.Resources{
-					KubernetesResource: &v1alpha1.KubernetesResource{
-						Replicas: ptr.Int32(1),
-					},
-				},
-			},
-		},
-	}, {
 		name: "set replicas to 1 if provided replicas is 0 as part of eventlistener kubernetesResources",
 		in: &v1alpha1.EventListener{
 			Spec: v1alpha1.EventListenerSpec{
@@ -103,57 +90,14 @@ func TestEventListenerSetDefaults(t *testing.T) {
 				},
 			},
 		},
-		wc: v1alpha1.WithUpgradeViaDefaulting,
+		wc: contexts.WithUpgradeViaDefaulting,
 		want: &v1alpha1.EventListener{
 			Spec: v1alpha1.EventListenerSpec{
+				ServiceAccountName: config.DefaultServiceAccountValue,
 				Resources: v1alpha1.Resources{
 					KubernetesResource: &v1alpha1.KubernetesResource{
 						Replicas: ptr.Int32(1),
 					},
-				},
-			},
-		},
-	}, {
-		name: "deprecate podTemplate nodeselector to resource",
-		in: &v1alpha1.EventListener{
-			Spec: v1alpha1.EventListenerSpec{
-				DeprecatedPodTemplate: &v1alpha1.PodTemplate{
-					NodeSelector: map[string]string{"beta.kubernetes.io/os": "linux"},
-				},
-			},
-		},
-		wc: v1alpha1.WithUpgradeViaDefaulting,
-		want: &v1alpha1.EventListener{
-			Spec: v1alpha1.EventListenerSpec{
-				Resources: v1alpha1.Resources{
-					KubernetesResource: &v1alpha1.KubernetesResource{
-						WithPodSpec: duckv1.WithPodSpec{
-							Template: duckv1.PodSpecable{
-								Spec: corev1.PodSpec{
-									NodeSelector: map[string]string{"beta.kubernetes.io/os": "linux"},
-								},
-							},
-						}},
-				},
-			},
-		},
-	}, {
-		name: "deprecate podTemplate toleration to resource",
-		in: &v1alpha1.EventListener{
-			Spec: v1alpha1.EventListenerSpec{
-				DeprecatedPodTemplate: &v1alpha1.PodTemplate{Tolerations: []corev1.Toleration{{Key: "key"}}},
-			},
-		},
-		wc: v1alpha1.WithUpgradeViaDefaulting,
-		want: &v1alpha1.EventListener{
-			Spec: v1alpha1.EventListenerSpec{
-				Resources: v1alpha1.Resources{
-					KubernetesResource: &v1alpha1.KubernetesResource{
-						WithPodSpec: duckv1.WithPodSpec{
-							Template: duckv1.PodSpecable{
-								Spec: corev1.PodSpec{Tolerations: []corev1.Toleration{{Key: "key"}}},
-							},
-						}},
 				},
 			},
 		},
@@ -168,26 +112,10 @@ func TestEventListenerSetDefaults(t *testing.T) {
 				},
 			},
 		},
-		wc: v1alpha1.WithUpgradeViaDefaulting,
+		wc: contexts.WithUpgradeViaDefaulting,
 		want: &v1alpha1.EventListener{
 			Spec: v1alpha1.EventListenerSpec{
-				Resources: v1alpha1.Resources{
-					KubernetesResource: &v1alpha1.KubernetesResource{
-						Replicas: ptr.Int32(2),
-					},
-				},
-			},
-		},
-	}, {
-		name: "different value for deprecated replicas other than 0",
-		in: &v1alpha1.EventListener{
-			Spec: v1alpha1.EventListenerSpec{
-				DeprecatedReplicas: ptr.Int32(2),
-			},
-		},
-		wc: v1alpha1.WithUpgradeViaDefaulting,
-		want: &v1alpha1.EventListener{
-			Spec: v1alpha1.EventListenerSpec{
+				ServiceAccountName: config.DefaultServiceAccountValue,
 				Resources: v1alpha1.Resources{
 					KubernetesResource: &v1alpha1.KubernetesResource{
 						Replicas: ptr.Int32(2),
@@ -208,9 +136,10 @@ func TestEventListenerSetDefaults(t *testing.T) {
 				}},
 			},
 		},
-		wc: v1alpha1.WithUpgradeViaDefaulting,
+		wc: contexts.WithUpgradeViaDefaulting,
 		want: &v1alpha1.EventListener{
 			Spec: v1alpha1.EventListenerSpec{
+				ServiceAccountName: config.DefaultServiceAccountValue,
 				Triggers: []v1alpha1.EventListenerTrigger{{
 					Interceptors: []*v1alpha1.EventInterceptor{{
 						Ref: v1alpha1.InterceptorRef{
@@ -220,6 +149,44 @@ func TestEventListenerSetDefaults(t *testing.T) {
 					}},
 				}},
 			},
+		},
+	}, {
+		name: "EventListener default config context with sa",
+		in: &v1alpha1.EventListener{
+			Spec: v1alpha1.EventListenerSpec{
+				Triggers: []v1alpha1.EventListenerTrigger{{
+					Interceptors: []*v1alpha1.EventInterceptor{{
+						Ref: v1alpha1.InterceptorRef{
+							Name: "cel",
+						},
+					}},
+				}},
+			},
+		},
+		want: &v1alpha1.EventListener{
+			Spec: v1alpha1.EventListenerSpec{
+				ServiceAccountName: "tekton",
+				Triggers: []v1alpha1.EventListenerTrigger{{
+					Interceptors: []*v1alpha1.EventInterceptor{{
+						Ref: v1alpha1.InterceptorRef{
+							Name: "cel",
+							Kind: v1alpha1.ClusterInterceptorKind,
+						},
+					}},
+				}},
+			},
+		},
+		wc: func(ctx context.Context) context.Context {
+			s := config.NewStore(logtesting.TestLogger(t))
+			s.OnConfigChanged(&corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: config.GetDefaultsConfigName(),
+				},
+				Data: map[string]string{
+					"default-service-account": "tekton",
+				},
+			})
+			return contexts.WithUpgradeViaDefaulting(s.ToContext(ctx))
 		},
 	}}
 	for _, tc := range tests {

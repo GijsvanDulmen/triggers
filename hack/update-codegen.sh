@@ -18,6 +18,10 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
+source $(git rev-parse --show-toplevel)/hack/setup-temporary-gopath.sh
+shim_gopath
+trap shim_gopath_clean EXIT
+
 source $(git rev-parse --show-toplevel)/vendor/github.com/tektoncd/plumbing/scripts/library.sh
 
 PREFIX=${GOBIN:-${GOPATH}/bin}
@@ -30,15 +34,26 @@ GOFLAGS="-mod=vendor"
 #                  instead of the $GOPATH directly. For normal projects this can be dropped.
 bash ${REPO_ROOT_DIR}/hack/generate-groups.sh "deepcopy,client,informer,lister" \
   github.com/tektoncd/triggers/pkg/client github.com/tektoncd/triggers/pkg/apis \
-  triggers:v1alpha1 \
+  "triggers:v1alpha1,v1beta1" \
   --go-header-file ${REPO_ROOT_DIR}/hack/boilerplate/boilerplate.go.txt
+
+${PREFIX}/deepcopy-gen \
+  -O zz_generated.deepcopy \
+  --go-header-file ${REPO_ROOT_DIR}/hack/boilerplate/boilerplate.go.txt \
+  -i github.com/tektoncd/triggers/pkg/apis/config
 
 # Knative Injection
 bash ${REPO_ROOT_DIR}/hack/generate-knative.sh "injection" \
   github.com/tektoncd/triggers/pkg/client github.com/tektoncd/triggers/pkg/apis \
-  "triggers:v1alpha1" \
+  "triggers:v1alpha1,v1beta1" \
   --go-header-file ${REPO_ROOT_DIR}/hack/boilerplate/boilerplate.go.txt
 GOFLAGS="${OLDGOFLAGS}"
 
 # Make sure our dependencies are up-to-date
 ${REPO_ROOT_DIR}/hack/update-deps.sh
+
+# Make sure the OpenAPI specification and Swagger file are up-to-date
+${REPO_ROOT_DIR}/hack/update-openapigen.sh
+
+# Make sure the API reference docs are up-to-date
+${REPO_ROOT_DIR}/hack/update-reference-docs.sh

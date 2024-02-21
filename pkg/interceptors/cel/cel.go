@@ -32,25 +32,21 @@ import (
 	"github.com/google/cel-go/common/types/ref"
 	"github.com/google/cel-go/common/types/traits"
 	celext "github.com/google/cel-go/ext"
+	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
 	"github.com/tidwall/sjson"
-	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
-	"k8s.io/client-go/kubernetes"
-
-	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
 )
 
-var _ triggersv1.InterceptorInterface = (*Interceptor)(nil)
+var _ triggersv1.InterceptorInterface = (*InterceptorImpl)(nil)
 
-// Interceptor implements a CEL based interceptor that uses CEL expressions
+// InterceptorImpl implements a CEL based interceptor that uses CEL expressions
 // against the incoming body and headers to match, if the expression returns
 // a true value, then the interception is "successful".
-type Interceptor struct {
-	KubeClientSet    kubernetes.Interface
-	Logger           *zap.SugaredLogger
-	CEL              *triggersv1.CELInterceptor
+type InterceptorImpl struct {
+	SecretGetter     interceptors.SecretGetter
+	CEL              *InterceptorParams
 	TriggerNamespace string
 }
 
@@ -61,11 +57,23 @@ var (
 )
 
 // NewInterceptor creates a prepopulated Interceptor.
-func NewInterceptor(k kubernetes.Interface, l *zap.SugaredLogger) *Interceptor {
-	return &Interceptor{
-		Logger:        l,
-		KubeClientSet: k,
+func NewInterceptor(sg interceptors.SecretGetter) *InterceptorImpl {
+	return &InterceptorImpl{
+		SecretGetter: sg,
 	}
+}
+
+// InterceptorParams provides a webhook to intercept and pre-process events
+type InterceptorParams struct {
+	Filter string `json:"filter,omitempty"`
+	// +listType=atomic
+	Overlays []Overlay `json:"overlays,omitempty"`
+}
+
+// Overlay provides a way to modify the request body using CEL expressions
+type Overlay struct {
+	Key        string `json:"key,omitempty"`
+	Expression string `json:"expression,omitempty"`
 }
 
 func evaluate(expr string, env *cel.Env, data map[string]interface{}) (ref.Val, error) {
@@ -79,7 +87,7 @@ func evaluate(expr string, env *cel.Env, data map[string]interface{}) (ref.Val, 
 		return nil, fmt.Errorf("expression %#v check failed: %w", expr, issues.Err())
 	}
 
-	prg, err := env.Program(checked)
+	prg, err := env.Program(checked, cel.EvalOptions(cel.OptOptimize))
 	if err != nil {
 		return nil, fmt.Errorf("expression %#v failed to create a Program: %w", expr, err)
 	}
@@ -91,10 +99,10 @@ func evaluate(expr string, env *cel.Env, data map[string]interface{}) (ref.Val, 
 	return out, nil
 }
 
-func makeCelEnv(ns string, k kubernetes.Interface) (*cel.Env, error) {
+func makeCelEnv(ctx context.Context, ns string, sg interceptors.SecretGetter) (*cel.Env, error) {
 	mapStrDyn := decls.NewMapType(decls.String, decls.Dyn)
 	return cel.NewEnv(
-		Triggers(ns, k),
+		Triggers(ctx, ns, sg),
 		celext.Strings(),
 		celext.Encoders(),
 		cel.Declarations(
@@ -119,14 +127,18 @@ func makeEvalContext(body []byte, h http.Header, url string, extensions map[stri
 	}, nil
 }
 
-func (w *Interceptor) Process(ctx context.Context, r *triggersv1.InterceptorRequest) *triggersv1.InterceptorResponse {
-	p := triggersv1.CELInterceptor{}
+func (w *InterceptorImpl) Process(ctx context.Context, r *triggersv1.InterceptorRequest) *triggersv1.InterceptorResponse {
+	p := InterceptorParams{}
 	if err := interceptors.UnmarshalParams(r.InterceptorParams, &p); err != nil {
 		return interceptors.Failf(codes.InvalidArgument, "failed to parse interceptor params: %v", err)
 	}
 
+	if r.Context == nil {
+		return interceptors.Failf(codes.InvalidArgument, "no request context passed")
+	}
+
 	ns, _ := triggersv1.ParseTriggerID(r.Context.TriggerID)
-	env, err := makeCelEnv(ns, w.KubeClientSet)
+	env, err := makeCelEnv(ctx, ns, w.SecretGetter)
 	if err != nil {
 		return interceptors.Failf(codes.Internal, "error creating cel environment: %v", err)
 	}

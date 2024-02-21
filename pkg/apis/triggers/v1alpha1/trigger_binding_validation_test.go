@@ -18,6 +18,7 @@ package v1alpha1_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -29,7 +30,7 @@ import (
 func Test_TriggerBindingValidate_OnDelete(t *testing.T) {
 	tb := &v1alpha1.TriggerBinding{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "name",
+			Name:      strings.Repeat("foo", 64), // Length should be lower than 63,
 			Namespace: "namespace",
 		},
 		Spec: v1alpha1.TriggerBindingSpec{
@@ -53,14 +54,6 @@ func Test_TriggerBindingValidate(t *testing.T) {
 		name string
 		tb   *v1alpha1.TriggerBinding
 	}{{
-		name: "empty",
-		tb: &v1alpha1.TriggerBinding{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "name",
-				Namespace: "namespace",
-			},
-		},
-	}, {
 		name: "multiple params",
 		tb: &v1alpha1.TriggerBinding{
 			ObjectMeta: metav1.ObjectMeta{
@@ -133,6 +126,15 @@ func Test_TriggerBindingValidate_error(t *testing.T) {
 		tb     *v1alpha1.TriggerBinding
 		errMsg string
 	}{{
+		name: "empty",
+		tb: &v1alpha1.TriggerBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "name",
+				Namespace: "namespace",
+			},
+		},
+		errMsg: "missing field(s): spec",
+	}, {
 		name: "duplicate params",
 		tb: &v1alpha1.TriggerBinding{
 			ObjectMeta: metav1.ObjectMeta{

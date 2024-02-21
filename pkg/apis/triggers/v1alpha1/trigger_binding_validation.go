@@ -21,21 +21,30 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/tektoncd/pipeline/pkg/apis/validate"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"knative.dev/pkg/apis"
 )
 
 // Validate TriggerBinding.
-func (tb *TriggerBinding) Validate(ctx context.Context) *apis.FieldError {
+func (tb *TriggerBinding) Validate(ctx context.Context) (errs *apis.FieldError) {
 	if apis.IsInDelete(ctx) {
 		return nil
 	}
-	return tb.Spec.Validate(ctx).ViaField("spec")
+
+	errs = validate.ObjectMetadata(tb.GetObjectMeta()).ViaField("metadata")
+	return errs.Also(tb.Spec.Validate(ctx).ViaField("spec"))
 }
 
+// revive:disable:unused-parameter
+
 // Validate TriggerBindingSpec.
-func (s *TriggerBindingSpec) Validate(ctx context.Context) *apis.FieldError {
-	return validateParams(s.Params).ViaField("params")
+func (s *TriggerBindingSpec) Validate(ctx context.Context) (errs *apis.FieldError) {
+	if equality.Semantic.DeepEqual(s, &TriggerBindingSpec{}) {
+		return errs.Also(apis.ErrMissingField(apis.CurrentField))
+	}
+	return errs.Also(validateParams(s.Params).ViaField("params"))
 }
 
 func validateParams(params []Param) *apis.FieldError {

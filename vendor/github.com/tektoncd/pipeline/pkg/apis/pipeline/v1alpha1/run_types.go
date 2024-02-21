@@ -18,50 +18,72 @@ package v1alpha1
 
 import (
 	"fmt"
+	"time"
 
+	apisconfig "github.com/tektoncd/pipeline/pkg/apis/config"
 	"github.com/tektoncd/pipeline/pkg/apis/pipeline"
-	v1beta1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
+	pod "github.com/tektoncd/pipeline/pkg/apis/pipeline/pod"
+	"github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
 	runv1alpha1 "github.com/tektoncd/pipeline/pkg/apis/run/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/utils/clock"
 	"knative.dev/pkg/apis"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 )
 
-var (
-	runGroupVersionKind = schema.GroupVersionKind{
-		Group:   SchemeGroupVersion.Group,
-		Version: SchemeGroupVersion.Version,
-		Kind:    pipeline.RunControllerName,
-	}
-)
+// EmbeddedRunSpec allows custom task definitions to be embedded
+type EmbeddedRunSpec struct {
+	runtime.TypeMeta `json:",inline"`
+
+	// +optional
+	Metadata v1beta1.PipelineTaskMetadata `json:"metadata,omitempty"`
+
+	// Spec is a specification of a custom task
+	// +optional
+	Spec runtime.RawExtension `json:"spec,omitempty"`
+}
 
 // RunSpec defines the desired state of Run
 type RunSpec struct {
 	// +optional
-	Ref *TaskRef `json:"ref,omitempty"`
+	Ref *v1beta1.TaskRef `json:"ref,omitempty"`
+
+	// Spec is a specification of a custom task
+	// +optional
+	Spec *EmbeddedRunSpec `json:"spec,omitempty"`
 
 	// +optional
-	Params []v1beta1.Param `json:"params,omitempty"`
+	Params v1beta1.Params `json:"params,omitempty"`
 
 	// Used for cancelling a run (and maybe more later on)
 	// +optional
 	Status RunSpecStatus `json:"status,omitempty"`
+
+	// Status message for cancellation.
+	// +optional
+	StatusMessage RunSpecStatusMessage `json:"statusMessage,omitempty"`
+
+	// Used for propagating retries count to custom tasks
+	// +optional
+	Retries int `json:"retries,omitempty"`
 
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName"`
 
 	// PodTemplate holds pod specific configuration
 	// +optional
-	PodTemplate *PodTemplate `json:"podTemplate,omitempty"`
+	PodTemplate *pod.PodTemplate `json:"podTemplate,omitempty"`
+
+	// Time after which the custom-task times out.
+	// Refer Go's ParseDuration documentation for expected format: https://golang.org/pkg/time/#ParseDuration
+	// +optional
+	Timeout *metav1.Duration `json:"timeout,omitempty"`
 
 	// Workspaces is a list of WorkspaceBindings from volumes to workspaces.
 	// +optional
 	Workspaces []v1beta1.WorkspaceBinding `json:"workspaces,omitempty"`
-
-	// TODO(https://github.com/tektoncd/community/pull/128)
-	// - timeout
-	// - inline task spec
 }
 
 // RunSpecStatus defines the taskrun spec status the user can provide
@@ -73,6 +95,18 @@ const (
 	RunSpecStatusCancelled RunSpecStatus = "RunCancelled"
 )
 
+// RunSpecStatusMessage defines human readable status messages for the TaskRun.
+type RunSpecStatusMessage string
+
+const (
+	// RunCancelledByPipelineMsg indicates that the PipelineRun of which part this Run was
+	// has been cancelled.
+	RunCancelledByPipelineMsg RunSpecStatusMessage = "Run cancelled as the PipelineRun it belongs to has been cancelled."
+	// RunCancelledByPipelineTimeoutMsg indicates that the Run was cancelled because the PipelineRun running it timed out.
+	RunCancelledByPipelineTimeoutMsg RunSpecStatusMessage = "Run cancelled as the PipelineRun it belongs to has timed out."
+)
+
+// GetParam gets the Param from the RunSpec with the given name
 // TODO(jasonhall): Move this to a Params type so other code can use it?
 func (rs RunSpec) GetParam(name string) *v1beta1.Param {
 	for _, p := range rs.Params {
@@ -83,16 +117,33 @@ func (rs RunSpec) GetParam(name string) *v1beta1.Param {
 	return nil
 }
 
+// RunReason is an enum used to store all Run reason for the Succeeded condition that are controlled by the Run itself.
+type RunReason string
+
 const (
+	// RunReasonStarted is the reason set when the Run has just started.
+	RunReasonStarted RunReason = "Started"
+	// RunReasonRunning is the reason set when the Run is running.
+	RunReasonRunning RunReason = "Running"
+	// RunReasonSuccessful is the reason set when the Run completed successfully.
+	RunReasonSuccessful RunReason = "Succeeded"
+	// RunReasonFailed is the reason set when the Run completed with a failure.
+	RunReasonFailed RunReason = "Failed"
 	// RunReasonCancelled must be used in the Condition Reason to indicate that a Run was cancelled.
-	RunReasonCancelled = "RunCancelled"
+	RunReasonCancelled RunReason = "RunCancelled"
+	// RunReasonTimedOut must be used in the Condition Reason to indicate that a Run was timed out.
+	RunReasonTimedOut RunReason = "RunTimedOut"
 	// RunReasonWorkspaceNotSupported can be used in the Condition Reason to indicate that the
 	// Run contains a workspace which is not supported by this custom task.
-	RunReasonWorkspaceNotSupported = "RunWorkspaceNotSupported"
+	RunReasonWorkspaceNotSupported RunReason = "RunWorkspaceNotSupported"
 	// RunReasonPodTemplateNotSupported can be used in the Condition Reason to indicate that the
 	// Run contains a pod template which is not supported by this custom task.
-	RunReasonPodTemplateNotSupported = "RunPodTemplateNotSupported"
+	RunReasonPodTemplateNotSupported RunReason = "RunPodTemplateNotSupported"
 )
+
+func (t RunReason) String() string {
+	return string(t)
+}
 
 // RunStatus defines the observed state of Run.
 type RunStatus = runv1alpha1.RunStatus
@@ -143,9 +194,14 @@ type RunList struct {
 	Items           []Run `json:"items"`
 }
 
-// GetOwnerReference gets the task run as owner reference for any related objects
-func (r *Run) GetOwnerReference() metav1.OwnerReference {
-	return *metav1.NewControllerRef(r, runGroupVersionKind)
+// GetStatusCondition returns the task run status as a ConditionAccessor
+func (r *Run) GetStatusCondition() apis.ConditionAccessor {
+	return &r.Status
+}
+
+// GetGroupVersionKind implements kmeta.OwnerRefable.
+func (*Run) GetGroupVersionKind() schema.GroupVersionKind {
+	return SchemeGroupVersion.WithKind(pipeline.RunControllerName)
 }
 
 // HasPipelineRunOwnerReference returns true of Run has
@@ -174,13 +230,41 @@ func (r *Run) HasStarted() bool {
 	return r.Status.StartTime != nil && !r.Status.StartTime.IsZero()
 }
 
-// IsSuccessful returns true if the Run's status indicates that it is done.
+// IsSuccessful returns true if the Run's status indicates that it has succeeded.
 func (r *Run) IsSuccessful() bool {
-	return r.Status.GetCondition(apis.ConditionSucceeded).IsTrue()
+	return r != nil && r.Status.GetCondition(apis.ConditionSucceeded).IsTrue()
 }
 
-// GetRunKey return the taskrun key for timeout handler map
+// GetRunKey return the run's key for timeout handler map
 func (r *Run) GetRunKey() string {
-	// The address of the pointer is a threadsafe unique identifier for the taskrun
+	// The address of the pointer is a threadsafe unique identifier for the run
 	return fmt.Sprintf("%s/%p", "Run", r)
+}
+
+// HasTimedOut returns true if the Run's running time is beyond the allowed timeout
+func (r *Run) HasTimedOut(c clock.PassiveClock) bool {
+	if r.Status.StartTime == nil || r.Status.StartTime.IsZero() {
+		return false
+	}
+	timeout := r.GetTimeout()
+	// If timeout is set to 0 or defaulted to 0, there is no timeout.
+	if timeout == apisconfig.NoTimeoutDuration {
+		return false
+	}
+	runtime := c.Since(r.Status.StartTime.Time)
+	return runtime > timeout
+}
+
+// GetTimeout returns the timeout for this run, or the default if not configured
+func (r *Run) GetTimeout() time.Duration {
+	// Use the platform default if no timeout is set
+	if r.Spec.Timeout == nil {
+		return apisconfig.DefaultTimeoutMinutes * time.Minute
+	}
+	return r.Spec.Timeout.Duration
+}
+
+// GetRetryCount returns the number of times this Run has already been retried
+func (r *Run) GetRetryCount() int {
+	return len(r.Status.RetriesStatus)
 }

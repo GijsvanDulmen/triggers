@@ -1,3 +1,4 @@
+//go:build e2e
 // +build e2e
 
 /*
@@ -23,32 +24,33 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/tektoncd/triggers/pkg/apis/triggers"
 	"knative.dev/pkg/ptr"
 
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/tektoncd/pipeline/pkg/apis/pipeline/v1alpha1"
+	pipelinev1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
 	eventReconciler "github.com/tektoncd/triggers/pkg/reconciler/eventlistener"
+	"github.com/tektoncd/triggers/pkg/reconciler/eventlistener/resources"
 	"github.com/tektoncd/triggers/pkg/sink"
-	bldr "github.com/tektoncd/triggers/test/builder"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
@@ -57,17 +59,22 @@ import (
 )
 
 const (
-	resourceLabel = triggersv1.GroupName + triggersv1.EventListenerLabelKey
-	triggerLabel  = triggersv1.GroupName + triggersv1.TriggerLabelKey
-	eventIDLabel  = triggersv1.GroupName + triggersv1.EventIDLabelKey
+	resourceLabel = triggers.GroupName + triggers.EventListenerLabelKey
+	triggerLabel  = triggers.GroupName + triggers.TriggerLabelKey
+	eventIDLabel  = triggers.GroupName + triggers.EventIDLabelKey
 
 	examplePRJsonFilename = "pr.json"
+)
+
+var (
+	// ignoreSATaskRunSpec ignores the service account in the TaskRunSpec as it may differ across platforms
+	ignoreSATaskRunSpec = cmpopts.IgnoreFields(pipelinev1.TaskRunSpec{}, "ServiceAccountName")
 )
 
 func loadExamplePREventBytes(t *testing.T) []byte {
 	t.Helper()
 	path := filepath.Join("testdata", examplePRJsonFilename)
-	bytes, err := ioutil.ReadFile(path)
+	bytes, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("Couldn't load test data example PullREquest event data: %v", err)
 	}
@@ -131,70 +138,75 @@ func TestEventListenerCreate(t *testing.T) {
 	t.Log("Start EventListener e2e test")
 
 	// TemplatedPipelineResources
-	pr1 := v1alpha1.PipelineResource{
+	tr1 := pipelinev1.TaskRun{
 		TypeMeta: metav1.TypeMeta{
-			Kind:       "PipelineResource",
-			APIVersion: "tekton.dev/v1alpha1",
+			APIVersion: "tekton.dev/v1",
+			Kind:       "TaskRun",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "pr1",
+			Name:      "tr1",
 			Namespace: namespace,
 			Labels: map[string]string{
 				"$(tt.params.oneparam)": "$(tt.params.oneparam)",
 			},
 		},
-		Spec: v1alpha1.PipelineResourceSpec{
-			Type: "git",
-		},
-	}
-	pr1Bytes, err := json.Marshal(pr1)
-	if err != nil {
-		t.Fatalf("Error marshalling PipelineResource 1: %s", err)
-	}
-	// This is a templated resource, which does not have a namespace.
-	// This is defaulted to the EventListener namespace.
-	pr2 := v1alpha1.PipelineResource{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "PipelineResource",
-			APIVersion: "tekton.dev/v1alpha1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "pr2",
-			Labels: map[string]string{
-				"$(tt.params.twoparamname)": "$(tt.params.twoparamvalue)",
-			},
-		},
-		Spec: v1alpha1.PipelineResourceSpec{
-			Type: "git",
-			Params: []v1alpha1.ResourceParam{
-				{Name: "license", Value: "$(tt.params.license)"},
-				{Name: "header", Value: "$(tt.params.header)"},
-				{Name: "prmessage", Value: "$(tt.params.prmessage)"},
+		Spec: pipelinev1.TaskRunSpec{
+			Params: []pipelinev1.Param{{
+				Name: "url",
+				Value: pipelinev1.ParamValue{
+					Type:      pipelinev1.ParamTypeString,
+					StringVal: "$(tt.params.url)",
+				}}},
+			TaskRef: &pipelinev1.TaskRef{
+				Name: "git-clone",
 			},
 		},
 	}
-	pr2Bytes, err := json.Marshal(pr2)
+
+	tr1Bytes, err := json.Marshal(tr1)
 	if err != nil {
-		t.Fatalf("Error marshalling ResourceTemplate PipelineResource 2: %s", err)
+		t.Fatalf("Error marshalling TaskRun 1: %s", err)
 	}
+	defaultValueStr := "defaultvalue"
 
 	// TriggerTemplate
 	tt, err := c.TriggersClient.TriggersV1alpha1().TriggerTemplates(namespace).Create(context.Background(),
-		bldr.TriggerTemplate("my-triggertemplate", "",
-			bldr.TriggerTemplateMeta(
-				bldr.Annotation("triggers.tekton.dev/old-escape-quotes", "true"),
-			),
-			bldr.TriggerTemplateSpec(
-				bldr.TriggerTemplateParam("oneparam", "", ""),
-				bldr.TriggerTemplateParam("twoparamname", "", ""),
-				bldr.TriggerTemplateParam("twoparamvalue", "", "defaultvalue"),
-				bldr.TriggerTemplateParam("license", "", ""),
-				bldr.TriggerTemplateParam("header", "", ""),
-				bldr.TriggerTemplateParam("prmessage", "", ""),
-				bldr.TriggerResourceTemplate(runtime.RawExtension{Raw: pr1Bytes}),
-				bldr.TriggerResourceTemplate(runtime.RawExtension{Raw: pr2Bytes}),
-			),
-		), metav1.CreateOptions{},
+		&triggersv1.TriggerTemplate{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "my-triggertemplate",
+				Annotations: map[string]string{
+					"triggers.tekton.dev/old-escape-quotes": "true",
+				},
+			},
+			Spec: triggersv1.TriggerTemplateSpec{
+				Params: []triggersv1.ParamSpec{
+					{
+						Name: "oneparam",
+					},
+					{
+						Name: "twoparamname",
+					},
+					{
+						Name:    "url",
+						Default: &defaultValueStr,
+					},
+					{
+						Name: "license",
+					},
+					{
+						Name: "header",
+					},
+					{
+						Name: "prmessage",
+					},
+				},
+				ResourceTemplates: []triggersv1.TriggerResourceTemplate{
+					{
+						RawExtension: runtime.RawExtension{Raw: tr1Bytes},
+					},
+				},
+			},
+		}, metav1.CreateOptions{},
 	)
 	if err != nil {
 		t.Fatalf("Error creating TriggerTemplate: %s", err)
@@ -202,13 +214,25 @@ func TestEventListenerCreate(t *testing.T) {
 
 	// TriggerBinding
 	tb, err := c.TriggersClient.TriggersV1alpha1().TriggerBindings(namespace).Create(context.Background(),
-		bldr.TriggerBinding("my-triggerbinding", "",
-			bldr.TriggerBindingSpec(
-				bldr.TriggerBindingParam("oneparam", "$(body.action)"),
-				bldr.TriggerBindingParam("twoparamname", "$(body.pull_request.state)"),
-				bldr.TriggerBindingParam("prmessage", "$(body.pull_request.body)"),
-			),
-		), metav1.CreateOptions{},
+		&triggersv1.TriggerBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-triggerbinding"},
+			Spec: triggersv1.TriggerBindingSpec{
+				Params: []triggersv1.Param{
+					{
+						Name:  "oneparam",
+						Value: "$(body.action)",
+					},
+					{
+						Name:  "twoparamname",
+						Value: "$(body.pull_request.state)",
+					},
+					{
+						Name:  "prmessage",
+						Value: "$(body.pull_request.body)",
+					},
+				},
+			},
+		}, metav1.CreateOptions{},
 	)
 	if err != nil {
 		t.Fatalf("Error creating TriggerBinding: %s", err)
@@ -216,12 +240,21 @@ func TestEventListenerCreate(t *testing.T) {
 
 	// ClusterTriggerBinding
 	ctb, err := c.TriggersClient.TriggersV1alpha1().ClusterTriggerBindings().Create(context.Background(),
-		bldr.ClusterTriggerBinding("my-clustertriggerbinding",
-			bldr.ClusterTriggerBindingSpec(
-				bldr.TriggerBindingParam("license", "$(body.repository.license)"),
-				bldr.TriggerBindingParam("header", "$(header)"),
-			),
-		), metav1.CreateOptions{},
+		&triggersv1.ClusterTriggerBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-clustertriggerbinding"},
+			Spec: triggersv1.TriggerBindingSpec{
+				Params: []triggersv1.Param{
+					{
+						Name:  "license",
+						Value: "$(body.repository.license)",
+					},
+					{
+						Name:  "header",
+						Value: "$(header)",
+					},
+				},
+			},
+		}, metav1.CreateOptions{},
 	)
 	if err != nil {
 		t.Fatalf("Error creating ClusterTriggerBinding: %s", err)
@@ -241,12 +274,12 @@ func TestEventListenerCreate(t *testing.T) {
 		&rbacv1.ClusterRole{
 			ObjectMeta: metav1.ObjectMeta{Name: "my-role"},
 			Rules: []rbacv1.PolicyRule{{
-				APIGroups: []string{triggersv1.GroupName},
-				Resources: []string{"clustertriggerbindings", "eventlisteners", "clusterinterceptors", "triggerbindings", "triggertemplates", "triggers"},
+				APIGroups: []string{triggers.GroupName},
+				Resources: []string{"clustertriggerbindings", "eventlisteners", "clusterinterceptors", "interceptors", "triggerbindings", "triggertemplates", "triggers"},
 				Verbs:     []string{"get", "list", "watch"},
 			}, {
 				APIGroups: []string{"tekton.dev"},
-				Resources: []string{"pipelineresources"},
+				Resources: []string{"taskruns"},
 				Verbs:     []string{"create"},
 			}, {
 				APIGroups: []string{""},
@@ -337,50 +370,39 @@ func TestEventListenerCreate(t *testing.T) {
 	// Load the example pull request event data
 	eventBodyJSON := loadExamplePREventBytes(t)
 
+	timeout := metav1.Duration{Duration: time.Hour}
 	// Event body & Expected ResourceTemplates after instantiation
-	wantPr1 := v1alpha1.PipelineResource{
+	wantTr1 := pipelinev1.TaskRun{
 		TypeMeta: metav1.TypeMeta{
-			Kind:       "PipelineResource",
-			APIVersion: "tekton.dev/v1alpha1",
+			APIVersion: "tekton.dev/v1",
+			Kind:       "TaskRun",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "pr1",
+			Name:      "tr1",
 			Namespace: namespace,
 			Labels: map[string]string{
-				resourceLabel: "my-eventlistener",
-				triggerLabel:  el.Spec.Triggers[0].Name,
-				"edited":      "edited",
+				"app.kubernetes.io/managed-by": "tekton-pipelines",
+				resourceLabel:                  "my-eventlistener",
+				triggerLabel:                   el.Spec.Triggers[0].Name,
+				"edited":                       "edited",
 			},
 		},
-		Spec: v1alpha1.PipelineResourceSpec{
-			Type: "git",
-		},
-	}
-	wantPr2 := v1alpha1.PipelineResource{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "PipelineResource",
-			APIVersion: "tekton.dev/v1alpha1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "pr2",
-			Namespace: namespace,
-			Labels: map[string]string{
-				resourceLabel: "my-eventlistener",
-				triggerLabel:  el.Spec.Triggers[0].Name,
-				"open":        "defaultvalue",
+		Spec: pipelinev1.TaskRunSpec{
+			Params: []pipelinev1.Param{{
+				Name: "url",
+				Value: pipelinev1.ParamValue{
+					Type:      pipelinev1.ParamTypeString,
+					StringVal: defaultValueStr,
+				}}},
+			TaskRef: &pipelinev1.TaskRef{
+				Name: "git-clone",
+				Kind: "Task",
 			},
-		},
-		Spec: v1alpha1.PipelineResourceSpec{
-			Type: "git",
-			Params: []v1alpha1.ResourceParam{
-				{Name: "license", Value: `{"key":"apache-2.0","name":"Apache License 2.0","spdx_id":"Apache-2.0","url":"https://api.github.com/licenses/apache-2.0","node_id":"MDc6TGljZW5zZTI="}`},
-				{Name: "header", Value: `{"Accept-Encoding":"gzip","Content-Length":"2154","Content-Type":"application/json","User-Agent":"Go-http-client/1.1"}`},
-				{Name: "prmessage", Value: "Git admission control\r\n\r\nNow with new lines!\r\n\r\n# :sunglasses: \r\n\r\naw yis"},
-			},
+			Timeout: &timeout,
 		},
 	}
 
-	labelSelector := fields.SelectorFromSet(eventReconciler.GenerateResourceLabels(el.Name, eventReconciler.DefaultStaticResourceLabels)).String()
+	labelSelector := fields.SelectorFromSet(resources.GenerateLabels(el.Name, resources.DefaultStaticResourceLabels)).String()
 	// Grab EventListener sink pods
 	sinkPods, err := c.KubeClient.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{LabelSelector: labelSelector})
 	if err != nil {
@@ -388,7 +410,7 @@ func TestEventListenerCreate(t *testing.T) {
 	}
 
 	// ElPort forward sink pod for http request
-	portString := strconv.Itoa(8000)
+	portString := strconv.Itoa(8080)
 	podName := sinkPods.Items[0].Name
 	stopChan, errChan := make(chan struct{}, 1), make(chan error, 1)
 
@@ -419,8 +441,10 @@ func TestEventListenerCreate(t *testing.T) {
 			return
 		}
 		go func() {
+			// revive:disable:empty-block
 			for range readyChan {
 			}
+			// revive:enable:empty-block
 			if len(errOut.String()) != 0 {
 				errChan <- fmt.Errorf("%s", errOut)
 			}
@@ -436,7 +460,7 @@ func TestEventListenerCreate(t *testing.T) {
 		t.Fatalf("Forwarding stream of data failed:: %v", err)
 	}
 	// Send POST request to EventListener sink
-	req, err := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%s", portString), bytes.NewBuffer(eventBodyJSON))
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%s", portString), bytes.NewBuffer(eventBodyJSON))
 	if err != nil {
 		t.Fatalf("Error creating POST request: %s", err)
 	}
@@ -465,79 +489,25 @@ func TestEventListenerCreate(t *testing.T) {
 		t.Errorf("sink response no eventID")
 	}
 
-	for _, wantPr := range []v1alpha1.PipelineResource{wantPr1, wantPr2} {
-		if err = WaitFor(pipelineResourceExist(t, c, namespace, wantPr.Name)); err != nil {
-			t.Fatalf("Failed to create ResourceTemplate %s: %s", wantPr.Name, err)
+	for _, wantTr := range []pipelinev1.TaskRun{wantTr1} {
+		if err = WaitFor(taskrunExist(t, c, namespace, wantTr.Name)); err != nil {
+			t.Fatalf("Failed to create TaskRun %s: %s", wantTr.Name, err)
 		}
-		gotPr, err := c.ResourceClient.TektonV1alpha1().PipelineResources(namespace).Get(context.Background(), wantPr.Name, metav1.GetOptions{})
+		gotTr, err := c.PipelineClient.TektonV1().TaskRuns(namespace).Get(context.Background(), wantTr.Name, metav1.GetOptions{})
 		if err != nil {
-			t.Errorf("Error getting ResourceTemplate: %s: %s", wantPr.Name, err)
+			t.Errorf("Error getting TaskRun: %s: %s", wantTr.Name, err)
 		}
-		if gotPr.Labels[eventIDLabel] == "" {
-			t.Errorf("Instantiated ResourceTemplate missing EventId")
+		if gotTr.Labels[eventIDLabel] == "" {
+			t.Errorf("Instantiated TaskRun missing EventId")
 		} else {
-			delete(gotPr.Labels, eventIDLabel)
+			delete(gotTr.Labels, eventIDLabel)
 		}
-		if diff := cmp.Diff(wantPr.Labels, gotPr.Labels); diff != "" {
-			t.Errorf("Diff instantiated ResourceTemplate labels %s: -want +got: %s", wantPr.Name, diff)
+		if diff := cmp.Diff(wantTr.Labels, gotTr.Labels); diff != "" {
+			t.Errorf("Diff instantiated TaskRun labels %s: -want +got: %s", wantTr.Name, diff)
 		}
-		if diff := cmp.Diff(wantPr.Spec, gotPr.Spec, cmp.Comparer(compareParamsWithLicenseJSON)); diff != "" {
-			t.Errorf("Diff instantiated ResourceTemplate spec %s: -want +got: %s", wantPr.Name, diff)
+		if diff := cmp.Diff(wantTr.Spec, gotTr.Spec, ignoreSATaskRunSpec); diff != "" {
+			t.Errorf("Diff instantiated TaskRun spec %s: -want +got: %s", wantTr.Name, diff)
 		}
-	}
-
-	// Now let's override auth at the trigger level and make sure we get a permission problem
-
-	// create SA/secret with insufficient permissions to set at trigger level
-	userWithoutPermissions := "user-with-no-permissions"
-	triggerSA := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      userWithoutPermissions,
-			Namespace: namespace,
-			UID:       types.UID(userWithoutPermissions),
-		},
-	}
-
-	_, err = c.KubeClient.CoreV1().ServiceAccounts(namespace).Create(context.Background(), triggerSA, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("Error creating trigger SA: %s", err.Error())
-	}
-
-	if err := WaitFor(func() (bool, error) {
-		el, err := c.TriggersClient.TriggersV1alpha1().EventListeners(namespace).Get(context.Background(), el.Name, metav1.GetOptions{})
-		if err != nil {
-			return false, nil
-		}
-		for i, trigger := range el.Spec.Triggers {
-			trigger.ServiceAccountName = userWithoutPermissions
-			el.Spec.Triggers[i] = trigger
-		}
-		_, err = c.TriggersClient.TriggersV1alpha1().EventListeners(namespace).Update(context.Background(), el, metav1.UpdateOptions{})
-		if err != nil {
-			return false, nil
-		}
-		return true, nil
-	}); err != nil {
-		t.Fatalf("Failed to update EventListener for trigger auth test: %s", err)
-	}
-
-	// Verify the EventListener is ready with the new update
-	if err := WaitFor(eventListenerReady(t, c, namespace, el.Name)); err != nil {
-		t.Fatalf("EventListener not ready after trigger auth update: %s", err)
-	}
-	// Send POST request to EventListener sink
-	req, err = http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%s", portString), bytes.NewBuffer(eventBodyJSON))
-	if err != nil {
-		t.Fatalf("Error creating POST request for trigger auth: %s", err)
-	}
-	req.Header.Add("Content-Type", "application/json")
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Error sending POST request for trigger auth: %s", err)
-	}
-
-	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
-		t.Errorf("sink did not return 401/403 response. Got status code: %d", resp.StatusCode)
 	}
 
 	// now set the trigger SA to the original one, should not get a 401/403
@@ -564,7 +534,7 @@ func TestEventListenerCreate(t *testing.T) {
 		t.Fatalf("EventListener not ready after trigger auth update: %s", err)
 	}
 	// Send POST request to EventListener sink
-	req, err = http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%s", portString), bytes.NewBuffer(eventBodyJSON))
+	req, err = http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%s", portString), bytes.NewBuffer(eventBodyJSON))
 	if err != nil {
 		t.Fatalf("Error creating POST request for trigger auth: %s", err)
 	}
@@ -577,43 +547,6 @@ func TestEventListenerCreate(t *testing.T) {
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		t.Errorf("sink returned 401/403 response: %d", resp.StatusCode)
 	}
-}
-
-// The structure of this field corresponds to values for the `license` key in
-// testdata/pr.json, and can be used to unmarshal the dat.
-type license struct {
-	Key    string `json:"key"`
-	Name   string `json:"name"`
-	SpdxID string `json:"spdx_id"`
-	URL    string `json:"url"`
-	NodeID string `json:"node_id"`
-}
-
-// compareParamsWithLicenseJSON will compare the passed in ResourceParams by further checking
-// when the values aren't equal if they can be unmarshalled into the license object and if they are
-// then equal. This is because the order of values in a dictionary is not deterministic and dictionary
-// values passed through an event listener may change order.
-func compareParamsWithLicenseJSON(x, y v1alpha1.ResourceParam) bool {
-	xData := license{}
-	yData := license{}
-	if x.Name == y.Name {
-		if x.Value != y.Value {
-			// In order to compare these values, we are first unmarshalling them into the expected
-			// structures because differences in the dictionary order of keys can cause
-			// a string comparison to fail.
-			if err := json.Unmarshal([]byte(x.Value), &xData); err != nil {
-				return false
-			}
-			if err := json.Unmarshal([]byte(y.Value), &yData); err != nil {
-				return false
-			}
-			if diff := cmp.Diff(xData, yData); diff != "" {
-				return false
-			}
-		}
-		return true
-	}
-	return false
 }
 
 func cleanup(t *testing.T, c *clients, namespace, elName string) {

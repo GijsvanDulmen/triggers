@@ -27,19 +27,18 @@ import (
 	"strings"
 	"testing"
 
-	"go.uber.org/zap/zaptest"
-
 	"google.golang.org/grpc/codes"
 
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
 	"github.com/google/go-cmp/cmp"
+	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
+	"github.com/tektoncd/triggers/pkg/interceptors"
+	"github.com/tektoncd/triggers/test"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 	fakekubeclient "knative.dev/pkg/client/injection/kube/client/fake"
-	rtesting "knative.dev/pkg/reconciler/testing"
-
-	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
 )
 
 const testNS = "testing-ns"
@@ -47,45 +46,45 @@ const testNS = "testing-ns"
 func TestInterceptor_Process(t *testing.T) {
 	tests := []struct {
 		name           string
-		CEL            *triggersv1.CELInterceptor
+		CEL            *InterceptorParams
 		body           []byte
 		extensions     map[string]interface{}
 		wantExtensions map[string]interface{}
 	}{{
 		name: "simple body check with matching body",
-		CEL: &triggersv1.CELInterceptor{
+		CEL: &InterceptorParams{
 			Filter: "body.value == 'testing'",
 		},
 		body: json.RawMessage(`{"value":"testing"}`),
 	}, {
 		name: "simple header check with matching header",
-		CEL: &triggersv1.CELInterceptor{
+		CEL: &InterceptorParams{
 			Filter: "header['X-Test'][0] == 'test-value'",
 		},
 		body: json.RawMessage(`{}`),
 	}, {
 		name: "overloaded header check with case insensitive matching",
-		CEL: &triggersv1.CELInterceptor{
+		CEL: &InterceptorParams{
 			Filter: "header.match('x-test', 'test-value')",
 		},
 		body: json.RawMessage(`{}`),
 	}, {
 		name: "body and header check",
-		CEL: &triggersv1.CELInterceptor{
+		CEL: &InterceptorParams{
 			Filter: "header.match('x-test', 'test-value') && body.value == 'test'",
 		},
 		body: json.RawMessage(`{"value":"test"}`),
 	}, {
 		name: "body and header canonical check",
-		CEL: &triggersv1.CELInterceptor{
+		CEL: &InterceptorParams{
 			Filter: "header.canonical('x-test') == 'test-value' && body.value == 'test'",
 		},
 		body: json.RawMessage(`{"value":"test"}`),
 	}, {
 		name: "single overlay",
-		CEL: &triggersv1.CELInterceptor{
+		CEL: &InterceptorParams{
 			Filter: "body.value == 'test'",
-			Overlays: []triggersv1.CELOverlay{
+			Overlays: []Overlay{
 				{Key: "new", Expression: "body.value"},
 			},
 		},
@@ -95,8 +94,8 @@ func TestInterceptor_Process(t *testing.T) {
 		},
 	}, {
 		name: "single overlay with no filter",
-		CEL: &triggersv1.CELInterceptor{
-			Overlays: []triggersv1.CELOverlay{
+		CEL: &InterceptorParams{
+			Overlays: []Overlay{
 				{Key: "new", Expression: "body.ref.split('/')[2]"},
 			},
 		},
@@ -106,8 +105,8 @@ func TestInterceptor_Process(t *testing.T) {
 		},
 	}, {
 		name: "overlay with string library functions",
-		CEL: &triggersv1.CELInterceptor{
-			Overlays: []triggersv1.CELOverlay{
+		CEL: &InterceptorParams{
+			Overlays: []Overlay{
 				{Key: "new", Expression: "body.ref.split('/')[2]"},
 				{Key: "replaced", Expression: "body.name.replace('ing','ed',0)"},
 			},
@@ -118,39 +117,10 @@ func TestInterceptor_Process(t *testing.T) {
 			"replaced": "testing",
 		},
 	}, {
-		name: "decodeB64 with parseJSON",
-		CEL: &triggersv1.CELInterceptor{
-			Overlays: []triggersv1.CELOverlay{
-				{Key: "value", Expression: "body.value.decodeb64().parseJSON().test"},
-			},
-		},
-		body: json.RawMessage(`{"value":"eyJ0ZXN0IjoiZGVjb2RlIn0="}`),
-		wantExtensions: map[string]interface{}{
-			"value": "decode",
-		},
-	}, {
-		name: "decodeB64 to a field",
-		CEL: &triggersv1.CELInterceptor{
-			Overlays: []triggersv1.CELOverlay{
-				{Key: "value", Expression: "body.value.decodeb64()"},
-			},
-		},
-		body:           json.RawMessage(`{"value":"eyJ0ZXN0IjoiZGVjb2RlIn0="}`),
-		wantExtensions: map[string]interface{}{"value": "{\"test\":\"decode\"}"},
-	}, {
-		name: "decode base64 string",
-		CEL: &triggersv1.CELInterceptor{
-			Overlays: []triggersv1.CELOverlay{
-				{Key: "value", Expression: "body.value.decodeb64()"},
-			},
-		},
-		body:           json.RawMessage(`{"value":"dGVzdGluZw=="}`),
-		wantExtensions: map[string]interface{}{"value": "testing"},
-	}, {
 		name: "multiple overlays",
-		CEL: &triggersv1.CELInterceptor{
+		CEL: &InterceptorParams{
 			Filter: "body.value == 'test'",
-			Overlays: []triggersv1.CELOverlay{
+			Overlays: []Overlay{
 				{Key: "test.one", Expression: "body.value"},
 				{Key: "test.two", Expression: "body.value"},
 			},
@@ -165,12 +135,12 @@ func TestInterceptor_Process(t *testing.T) {
 		},
 	}, {
 		name: "nil body does not panic",
-		CEL:  &triggersv1.CELInterceptor{Filter: "header.match('x-test', 'test-value')"},
+		CEL:  &InterceptorParams{Filter: "header.match('x-test', 'test-value')"},
 		body: nil,
 	}, {
 		name: "incrementing an integer value",
-		CEL: &triggersv1.CELInterceptor{
-			Overlays: []triggersv1.CELOverlay{
+		CEL: &InterceptorParams{
+			Overlays: []Overlay{
 				{Key: "val1", Expression: "body.count + 1.0"},
 				{Key: "val2", Expression: "int(body.count) + 3"},
 				{Key: "val3", Expression: "body.count + 3.5"},
@@ -186,26 +156,26 @@ func TestInterceptor_Process(t *testing.T) {
 		},
 	}, {
 		name: "validating a secret",
-		CEL: &triggersv1.CELInterceptor{
+		CEL: &InterceptorParams{
 			Filter: "header.canonical('X-Secret-Token').compareSecret('token', 'test-secret', 'testing-ns')",
 		},
 		body: json.RawMessage(`{"count":1,"measure":1.7}`),
 	}, {
 		name: "validating a secret with a namespace and name",
-		CEL: &triggersv1.CELInterceptor{
+		CEL: &InterceptorParams{
 			Filter: "header.canonical('X-Secret-Token').compareSecret('token', 'test-secret', 'testing-ns') && body.count == 1.0",
 		},
 		body: json.RawMessage(`{"count":1,"measure":1.7}`),
 	}, {
 		name: "validating a secret in the default namespace",
-		CEL: &triggersv1.CELInterceptor{
+		CEL: &InterceptorParams{
 			Filter: "header.canonical('X-Secret-Token').compareSecret('token', 'test-secret') && body.count == 1.0",
 		},
 		body: json.RawMessage(`{"count":1,"measure":1.7}`),
 	}, {
 		name: "handling a list response",
-		CEL: &triggersv1.CELInterceptor{
-			Overlays: []triggersv1.CELOverlay{
+		CEL: &InterceptorParams{
+			Overlays: []Overlay{
 				{Key: "event", Expression: "body.event.map(s, s['testing'])"},
 			},
 		},
@@ -215,8 +185,8 @@ func TestInterceptor_Process(t *testing.T) {
 		},
 	}, {
 		name: "return different types of expression",
-		CEL: &triggersv1.CELInterceptor{
-			Overlays: []triggersv1.CELOverlay{
+		CEL: &InterceptorParams{
+			Overlays: []Overlay{
 				{Key: "one", Expression: "'yo'"},
 				{Key: "two", Expression: "false ? true : false"},
 				{Key: "three", Expression: "body.test"},
@@ -232,8 +202,8 @@ func TestInterceptor_Process(t *testing.T) {
 		},
 	}, {
 		name: "demonstrate defaulting logic within cel interceptor",
-		CEL: &triggersv1.CELInterceptor{
-			Overlays: []triggersv1.CELOverlay{
+		CEL: &InterceptorParams{
+			Overlays: []Overlay{
 				{Key: "one", Expression: "has(body.value) ? body.value : 'default'"},
 				{Key: "two", Expression: "has(body.test.second) ? body.test.second : 'default'"},
 				{Key: "three", Expression: "has(body.test.third) && has(body.test.third.thing) ? body.value.third.thing : 'default'"},
@@ -246,10 +216,23 @@ func TestInterceptor_Process(t *testing.T) {
 			"three": "default",
 		},
 	}, {
+		name: "string replacement with regexp",
+		CEL: &InterceptorParams{
+			Overlays: []Overlay{
+				{Key: "replaced1", Expression: `body.value.lowerAscii().translate("[^a-z0-9]+", "")`},
+				{Key: "replaced2", Expression: `body.value.lowerAscii().translate("[^a-z0-9]+", "ABC")`},
+			},
+		},
+		body: json.RawMessage(`{"value":"This is $an Invalid5String"}`),
+		wantExtensions: map[string]interface{}{
+			"replaced1": "thisisaninvalid5string",
+			"replaced2": "thisABCisABCanABCinvalid5string",
+		},
+	}, {
 		name: "filters and overlays can access passed in extensions",
-		CEL: &triggersv1.CELInterceptor{
+		CEL: &InterceptorParams{
 			Filter: `extensions.foo == "bar"`,
-			Overlays: []triggersv1.CELOverlay{
+			Overlays: []Overlay{
 				{Key: "one", Expression: "extensions.foo"},
 			},
 		},
@@ -261,8 +244,8 @@ func TestInterceptor_Process(t *testing.T) {
 		},
 	}, {
 		name: "decode with cel extension to a field",
-		CEL: &triggersv1.CELInterceptor{
-			Overlays: []triggersv1.CELOverlay{
+		CEL: &InterceptorParams{
+			Overlays: []Overlay{
 				{Key: "value", Expression: "base64.decode(body.b64value) == b'hello'"},
 				{Key: "compare_string", Expression: "base64.decode(body.b64value) == bytes('hello')"},
 				{Key: "decoded", Expression: "base64.decode(body.b64value)"},
@@ -278,15 +261,11 @@ func TestInterceptor_Process(t *testing.T) {
 	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(rt *testing.T) {
-			logger := zaptest.NewLogger(t)
-			ctx, _ := rtesting.SetupFakeContext(t)
-			kubeClient := fakekubeclient.Get(ctx)
-			if _, err := kubeClient.CoreV1().Secrets(testNS).Create(ctx, makeSecret(), metav1.CreateOptions{}); err != nil {
-				rt.Error(err)
-			}
-			w := &Interceptor{
-				KubeClientSet: kubeClient,
-				Logger:        logger.Sugar(),
+			ctx, _ := test.SetupFakeContext(t)
+			var clientset *fake.Clientset
+			ctx, clientset = fakekubeclient.With(ctx, makeSecret())
+			w := &InterceptorImpl{
+				SecretGetter: interceptors.DefaultSecretGetter(clientset.CoreV1()),
 			}
 			res := w.Process(ctx, &triggersv1.InterceptorRequest{
 				Body: string(tt.body),
@@ -312,7 +291,7 @@ func TestInterceptor_Process(t *testing.T) {
 			if tt.wantExtensions != nil {
 				got := res.Extensions
 				if diff := cmp.Diff(tt.wantExtensions, got); diff != "" {
-					rt.Fatalf("cel.Process() did return correct extensions (-wantMsg+got): %v", diff)
+					rt.Fatalf("cel.Process() did not return correct extensions (-wantMsg+got): %v", diff)
 				}
 			}
 		})
@@ -322,13 +301,13 @@ func TestInterceptor_Process(t *testing.T) {
 func TestInterceptor_Process_Error(t *testing.T) {
 	tests := []struct {
 		name     string
-		CEL      *triggersv1.CELInterceptor
+		CEL      *InterceptorParams
 		body     []byte
 		wantCode codes.Code
 		wantMsg  string
 	}{{
 		name: "simple body check with non-matching body",
-		CEL: &triggersv1.CELInterceptor{
+		CEL: &InterceptorParams{
 			Filter: "body.value == 'test'",
 		},
 		body:     []byte(`{"value":"testing"}`),
@@ -336,7 +315,7 @@ func TestInterceptor_Process_Error(t *testing.T) {
 		wantMsg:  "expression body.value == 'test' did not return true",
 	}, {
 		name: "simple header check with non matching header",
-		CEL: &triggersv1.CELInterceptor{
+		CEL: &InterceptorParams{
 			Filter: "header['X-Test'][0] == 'unknown'",
 		},
 		body:     []byte(`{}`),
@@ -344,7 +323,7 @@ func TestInterceptor_Process_Error(t *testing.T) {
 		wantMsg:  "expression header.*'unknown' did not return true",
 	}, {
 		name: "overloaded header check with case insensitive failed match",
-		CEL: &triggersv1.CELInterceptor{
+		CEL: &InterceptorParams{
 			Filter: "header.match('x-test', 'no-match')",
 		},
 		body:     []byte(`{}`),
@@ -352,7 +331,7 @@ func TestInterceptor_Process_Error(t *testing.T) {
 		wantMsg:  "expression header.match\\('x-test', 'no-match'\\) did not return true",
 	}, {
 		name: "unable to parse the expression",
-		CEL: &triggersv1.CELInterceptor{
+		CEL: &InterceptorParams{
 			Filter: "header['X-Test",
 		},
 		body:     []byte(`{"value":"test"}`),
@@ -360,7 +339,7 @@ func TestInterceptor_Process_Error(t *testing.T) {
 		wantMsg:  "Syntax error: token recognition error at: ''X-Test'",
 	}, {
 		name: "unable to parse the JSON body",
-		CEL: &triggersv1.CELInterceptor{
+		CEL: &InterceptorParams{
 			Filter: "body.value == 'test'",
 		},
 		body:     []byte(`{]`),
@@ -368,23 +347,30 @@ func TestInterceptor_Process_Error(t *testing.T) {
 		wantMsg:  "invalid character ']' looking for beginning of object key string",
 	}, {
 		name: "bad overlay",
-		CEL: &triggersv1.CELInterceptor{
+		CEL: &InterceptorParams{
 			Filter: "body.value == 'test'",
-			Overlays: []triggersv1.CELOverlay{
+			Overlays: []Overlay{
 				{Key: "new", Expression: "test.value"},
 			},
 		},
 		body:     []byte(`{"value":"test"}`),
 		wantCode: codes.InvalidArgument,
 		wantMsg:  `expression "test.value" check failed: ERROR:.*undeclared reference to 'test'`,
+	}, {
+		name: "unable to parse regexp in translate",
+		CEL: &InterceptorParams{
+			Overlays: []Overlay{
+				{Key: "converted", Expression: `body.value.translate("[^a-z0-9+", "")`},
+			},
+		},
+		body:     []byte(`{"value":"testing"}`),
+		wantCode: codes.InvalidArgument,
+		wantMsg:  "failed to parse regular expression for translation: error parsing regexp: missing closing ]",
 	},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := zaptest.NewLogger(t)
-			w := &Interceptor{
-				Logger: logger.Sugar(),
-			}
+			w := &InterceptorImpl{}
 			res := w.Process(context.Background(), &triggersv1.InterceptorRequest{
 				Body: string(tt.body),
 				Header: http.Header{
@@ -417,10 +403,7 @@ func TestInterceptor_Process_Error(t *testing.T) {
 }
 
 func TestInterceptor_Process_InvalidParams(t *testing.T) {
-	logger := zaptest.NewLogger(t)
-	w := &Interceptor{
-		Logger: logger.Sugar(),
-	}
+	w := &InterceptorImpl{}
 	res := w.Process(context.Background(), &triggersv1.InterceptorRequest{
 		Body:   `{}`,
 		Header: http.Header{},
@@ -436,7 +419,7 @@ func TestInterceptor_Process_InvalidParams(t *testing.T) {
 	if res.Continue {
 		t.Fatalf("cel.Process() uexpectedly returned continue: true. Response: %+v", res)
 	}
-	if codes.InvalidArgument != codes.Code(res.Status.Code) {
+	if codes.InvalidArgument != res.Status.Code {
 		t.Errorf("cel.Process() unexpected status.Code. wanted: %v, got: %v. Status is: %+v", codes.InvalidArgument, res.Status.Code, res.Status.Err())
 	}
 	wantErrMsg := "failed to marshal json"
@@ -462,7 +445,7 @@ func TestExpressionEvaluation(t *testing.T) {
 		},
 		"upperMsg":  "THIS IS LOWER CASE",
 		"b64value":  "ZXhhbXBsZQ==",
-		"json_body": `{"testing": "value"}`,
+		"json_body": `{"testing": "value", "number": 2}`,
 		"yaml_body": "key1: value1\nkey2: value2\nkey3: value3\n",
 		"testURL":   "https://user:password@site.example.com/path/to?query=search#first",
 		"multiURL":  "https://user:password@site.example.com/path/to?query=search&query=results",
@@ -473,6 +456,17 @@ func TestExpressionEvaluation(t *testing.T) {
 		"jsonArray": []string{
 			"one", "two",
 		},
+		"jsonObjects": []map[string]interface{}{
+			{
+				"testing1": map[string]interface{}{
+					"testing": []string{"test1", "test2"},
+				},
+			},
+		},
+		"numbers": []int64{
+			1, 2, 3, 4, 5,
+		},
+		"emptyList": []int64{},
 	}
 
 	refParts := strings.Split(testRef, "/")
@@ -494,7 +488,7 @@ func TestExpressionEvaluation(t *testing.T) {
 		{
 			name: "boolean body value",
 			expr: "body.value == 'testing'",
-			want: types.Bool(true),
+			want: types.True,
 		},
 		{
 			name: "truncate a long string",
@@ -514,12 +508,12 @@ func TestExpressionEvaluation(t *testing.T) {
 		{
 			name: "split a string on a character",
 			expr: "body.ref.split('/')",
-			want: types.NewStringList(reg, refParts),
+			want: reg.NativeToValue(refParts),
 		},
 		{
 			name: "extract a branch from a non refs string",
 			expr: "body.value.split('/')",
-			want: types.NewStringList(reg, []string{"testing"}),
+			want: reg.NativeToValue([]string{"testing"}),
 		},
 		{
 			name: "combine split and truncate",
@@ -537,11 +531,6 @@ func TestExpressionEvaluation(t *testing.T) {
 			want: types.String("value"),
 		},
 		{
-			name: "decode a base64 value",
-			expr: "body.b64value.decodeb64()",
-			want: types.String("example"),
-		},
-		{
 			name: "increment an integer",
 			expr: "body.pull_request.commits + 1",
 			want: types.Int(3),
@@ -549,45 +538,70 @@ func TestExpressionEvaluation(t *testing.T) {
 		{
 			name:   "compare string against secret",
 			expr:   "'secrettoken'.compareSecret('token', 'test-secret', 'testing-ns') ",
-			want:   types.Bool(true),
+			want:   types.True,
 			secret: makeSecret(),
 		},
 		{
 			name:   "compare string against secret with no match",
 			expr:   "'nomatch'.compareSecret('token', 'test-secret', 'testing-ns') ",
-			want:   types.Bool(false),
+			want:   types.False,
 			secret: makeSecret(),
 		},
 		{
 			name:   "compare string against secret in the default namespace",
 			expr:   "'secrettoken'.compareSecret('token', 'test-secret') ",
-			want:   types.Bool(true),
+			want:   types.True,
 			secret: makeSecret(),
 		},
 		{
 			name: "parse JSON body in a string",
 			expr: "body.json_body.parseJSON().testing == 'value'",
-			want: types.Bool(true),
+			want: types.True,
+		},
+		{
+			name: "compare a JSON number to an integer variable",
+			expr: "body.json_body.parseJSON().number == body.jsonObject.integer",
+			want: types.True,
+		},
+		{
+			name: "compare a JSON number to an int literal",
+			expr: "body.json_body.parseJSON().number > 1",
+			want: types.True,
+		},
+		{
+			name: "compare a JSON number to a uint literal",
+			expr: "body.json_body.parseJSON().number < 3u",
+			want: types.True,
+		},
+		{
+			name: "compare a JSON number to a double literal",
+			expr: "body.json_body.parseJSON().number == 2.0",
+			want: types.True,
+		},
+		{
+			name: "compare a JSON field to null",
+			expr: "body.json_body.parseJSON().number == null",
+			want: types.False,
 		},
 		{
 			name: "parse YAML body in a string",
 			expr: "body.yaml_body.parseYAML().key1 == 'value1'",
-			want: types.Bool(true),
+			want: types.True,
 		},
 		{
 			name: "parse URL",
 			expr: "body.testURL.parseURL().path == '/path/to'",
-			want: types.Bool(true),
+			want: types.True,
 		},
 		{
 			name: "parse URL and extract single string",
 			expr: "body.testURL.parseURL().query['query'] == 'search'",
-			want: types.Bool(true),
+			want: types.True,
 		},
 		{
 			name: "parse URL and extract multiple strings",
 			expr: "body.multiURL.parseURL().queryStrings['query']",
-			want: types.NewStringList(reg, []string{"search", "results"}),
+			want: reg.NativeToValue([]string{"search", "results"}),
 		},
 		{
 			name: "parse request url",
@@ -610,6 +624,11 @@ func TestExpressionEvaluation(t *testing.T) {
 			want: types.String(`["one","two"]`),
 		},
 		{
+			name: "marshal JSON objects to string",
+			expr: "body.jsonObjects.marshalJSON()",
+			want: types.String(`[{"testing1":{"testing":["test1","test2"]}}]`),
+		},
+		{
 			name: "extension base64 decoding",
 			expr: "base64.decode(body.b64value)",
 			want: types.Bytes("example"),
@@ -619,19 +638,66 @@ func TestExpressionEvaluation(t *testing.T) {
 			expr: "base64.encode(b'example')",
 			want: types.String("ZXhhbXBsZQ=="),
 		},
+		{
+			name: "extension string join",
+			expr: "body.jsonArray.join(', ')",
+			want: types.String("one, two"),
+		},
+		{
+			name: "extension string join",
+			expr: "body.jsonArray.join(', ')",
+			want: types.String("one, two"),
+		},
+		{
+			name: "last element in array",
+			expr: "body.testURL.parseURL().path.split('/').last()",
+			want: types.String("to"),
+		},
+		{
+			name: "last element in empty array",
+			expr: `body.emptyList.last()`,
+			want: types.NullValue,
+		},
+		{
+			name: "last element in numeric array",
+			expr: `body.numbers.last()`,
+			want: types.Int(5),
+		},
+		{
+			name: "last element in literal array",
+			expr: "[1, 2, 3, 4, 5].last()",
+			want: types.Int(5),
+		},
+		{
+			name: "first element in literal array",
+			expr: "[1, 2, 3, 4, 5].first()",
+			want: types.Int(1),
+		},
+		{
+			name: "first element in array",
+			// Splitting gets an empty route element so this filters it out.
+			expr: "body.testURL.parseURL().path.split('/').filter(t, t.size() > 0).first()",
+			want: types.String("path"),
+		},
+		{
+			name: "first element in empty array",
+			expr: `body.emptyList.first()`,
+			want: types.NullValue,
+		},
+		{
+			name: "first element in numeric array",
+			expr: `body.numbers.first()`,
+			want: types.Int(1),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(rt *testing.T) {
-			ctx, _ := rtesting.SetupFakeContext(rt)
-			kubeClient := fakekubeclient.Get(ctx)
+			ctx, _ := test.SetupFakeContext(rt)
+			clientset := fakekubeclient.Get(ctx)
 			if tt.secret != nil {
-				if _, err := kubeClient.CoreV1().
-					Secrets(tt.secret.ObjectMeta.Namespace).
-					Create(ctx, tt.secret, metav1.CreateOptions{}); err != nil {
-					rt.Error(err)
-				}
+				_, clientset = fakekubeclient.With(ctx, tt.secret)
 			}
-			env, err := makeCelEnv(testNS, kubeClient)
+			env, err := makeCelEnv(context.Background(), testNS, interceptors.DefaultSecretGetter(clientset.CoreV1()))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -701,11 +767,6 @@ func TestExpressionEvaluation_Error(t *testing.T) {
 			want: "failed to convert to http.Header",
 		},
 		{
-			name: "invalid base64 decoding",
-			expr: "\"AA=A\".decodeb64()",
-			want: "failed to decode 'AA=A' in decodeB64.*illegal base64 data",
-		},
-		{
 			name: "missing secret",
 			expr: "'testing'.compareSecret('testing', 'testSecret', 'mytoken')",
 			want: "failed to find secret.*testing.*",
@@ -716,19 +777,14 @@ func TestExpressionEvaluation_Error(t *testing.T) {
 			want: "invalid character 'e' in literal",
 		},
 		{
-			name: "base64 decoding non-string",
-			expr: "body.pull_request.decodeb64()",
-			want: "unexpected type 'map' passed to decodeB64",
-		},
-		{
 			name: "parseJSON decoding non-string",
 			expr: "body.pull_request.parseJSON().test == 'test'",
-			want: "unexpected type 'map' passed to parseJSON",
+			want: "no such overload: parseJSON(map)",
 		},
 		{
 			name: "parseYAML decoding non-string",
 			expr: "body.pull_request.parseYAML().key1 == 'value1'",
-			want: "unexpected type 'map' passed to parseYAML",
+			want: "no such overload: parseYAML(map)",
 		},
 		{
 			name: "unknown key",
@@ -743,27 +799,29 @@ func TestExpressionEvaluation_Error(t *testing.T) {
 		{
 			name: "marshalJSON marshalling string",
 			expr: "body.value.marshalJSON()",
-			want: "unexpected type 'string' passed to marshalJSON",
+			want: "no such overload: marshalJSON(string)",
 		},
 		{
 			name: "has function missing nested key",
 			expr: "has(body.pull_request.repository.owner) ? body.pull_request.repository.owner : 'me'",
 			want: `failed to evaluate: no such key: repository`,
 		},
+		{
+			name: "truncate json",
+			expr: "body.pull_request.truncate(7)",
+			want: "no such overload: truncate(map, int)",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(rt *testing.T) {
-			ctx, _ := rtesting.SetupFakeContext(t)
-			kubeClient := fakekubeclient.Get(ctx)
+			ctx, _ := test.SetupFakeContext(t)
 			ns := testNS
+			clientset := fakekubeclient.Get(ctx)
 			if tt.secretNS != "" {
-				secret := makeSecret()
-				if _, err := kubeClient.CoreV1().Secrets(secret.ObjectMeta.Namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
-					rt.Error(err)
-				}
+				_, clientset = fakekubeclient.With(ctx, makeSecret())
 				ns = tt.secretNS
 			}
-			env, err := makeCelEnv(ns, kubeClient)
+			env, err := makeCelEnv(context.Background(), ns, interceptors.DefaultSecretGetter(clientset.CoreV1()))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -772,7 +830,7 @@ func TestExpressionEvaluation_Error(t *testing.T) {
 				t.Fatal("evaluate() expected err but got nil.")
 			}
 
-			if !checkMessageContains(t, tt.want, err.Error()) {
+			if !checkMessageContains(t, tt.want, err.Error()) && !strings.Contains(err.Error(), tt.want) {
 				rt.Errorf("evaluate() got %s, wanted %s", err, tt.want)
 			}
 		})

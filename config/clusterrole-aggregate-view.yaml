@@ -25,7 +25,9 @@ rules:
   - triggers.tekton.dev
   resources:
   - clustertriggerbindings
+  - clusterinterceptors
   - eventlisteners
+  - interceptors
   - triggers
   - triggerbindings
   - triggertemplates

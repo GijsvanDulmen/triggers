@@ -25,55 +25,61 @@ import (
 	logger "github.com/sirupsen/logrus"
 	fakepipelineclientset "github.com/tektoncd/pipeline/pkg/client/clientset/versioned/fake"
 	fakepipelineclient "github.com/tektoncd/pipeline/pkg/client/injection/client/fake"
-	fakeresourceclientset "github.com/tektoncd/pipeline/pkg/client/resource/clientset/versioned/fake"
-	fakeresourceclient "github.com/tektoncd/pipeline/pkg/client/resource/injection/client/fake"
 	"github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
+	"github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
 	faketriggersclientset "github.com/tektoncd/triggers/pkg/client/clientset/versioned/fake"
-	dynamicclientset "github.com/tektoncd/triggers/pkg/client/dynamic/clientset"
-	"github.com/tektoncd/triggers/pkg/client/dynamic/clientset/tekton"
 	faketriggersclient "github.com/tektoncd/triggers/pkg/client/injection/client/fake"
 	fakeClusterInterceptorinformer "github.com/tektoncd/triggers/pkg/client/injection/informers/triggers/v1alpha1/clusterinterceptor/fake"
-	fakeclustertriggerbindinginformer "github.com/tektoncd/triggers/pkg/client/injection/informers/triggers/v1alpha1/clustertriggerbinding/fake"
-	fakeeventlistenerinformer "github.com/tektoncd/triggers/pkg/client/injection/informers/triggers/v1alpha1/eventlistener/fake"
-	faketriggerinformer "github.com/tektoncd/triggers/pkg/client/injection/informers/triggers/v1alpha1/trigger/fake"
-	faketriggerbindinginformer "github.com/tektoncd/triggers/pkg/client/injection/informers/triggers/v1alpha1/triggerbinding/fake"
-	faketriggertemplateinformer "github.com/tektoncd/triggers/pkg/client/injection/informers/triggers/v1alpha1/triggertemplate/fake"
+	fakeInterceptorinformer "github.com/tektoncd/triggers/pkg/client/injection/informers/triggers/v1alpha1/interceptor/fake"
+	fakeclustertriggerbindinginformer "github.com/tektoncd/triggers/pkg/client/injection/informers/triggers/v1beta1/clustertriggerbinding/fake"
+	fakeeventlistenerinformer "github.com/tektoncd/triggers/pkg/client/injection/informers/triggers/v1beta1/eventlistener/fake"
+	faketriggerinformer "github.com/tektoncd/triggers/pkg/client/injection/informers/triggers/v1beta1/trigger/fake"
+	faketriggerbindinginformer "github.com/tektoncd/triggers/pkg/client/injection/informers/triggers/v1beta1/triggerbinding/fake"
+	faketriggertemplateinformer "github.com/tektoncd/triggers/pkg/client/injection/informers/triggers/v1beta1/triggertemplate/fake"
+	"github.com/tektoncd/triggers/pkg/reconciler/eventlistener/resources"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	fakedynamic "k8s.io/client-go/dynamic/fake"
 	fakekubeclientset "k8s.io/client-go/kubernetes/fake"
-	"knative.dev/pkg/apis/duck"
+	"k8s.io/client-go/rest"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 	duckinformerfake "knative.dev/pkg/client/injection/ducks/duck/v1/podspecable/fake"
 	fakekubeclient "knative.dev/pkg/client/injection/kube/client/fake"
-	fakedeployinformer "knative.dev/pkg/client/injection/kube/informers/apps/v1/deployment/fake"
-	fakeconfigmapinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/configmap/fake"
+	fakefiltereddeployinformer "knative.dev/pkg/client/injection/kube/informers/apps/v1/deployment/filtered/fake"
 	fakepodinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/pod/fake"
 	fakesecretinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/secret/fake"
-	fakeserviceinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/service/fake"
+	fakefilteredserviceinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/service/filtered/fake"
 	fakeserviceaccountinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/serviceaccount/fake"
+	filteredinformerfactory "knative.dev/pkg/client/injection/kube/informers/factory/filtered"
 	"knative.dev/pkg/controller"
+	"knative.dev/pkg/injection"
 	fakedynamicclientset "knative.dev/pkg/injection/clients/dynamicclient/fake"
+	rtesting "knative.dev/pkg/reconciler/testing"
+	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+
+	// Import for creating fake filtered factory in the test
+	_ "knative.dev/pkg/client/injection/kube/informers/factory/filtered/fake"
 )
 
 // Resources represents the desired state of the system (i.e. existing resources)
 // to seed controllers with.
 type Resources struct {
 	Namespaces             []*corev1.Namespace
-	ClusterTriggerBindings []*v1alpha1.ClusterTriggerBinding
-	EventListeners         []*v1alpha1.EventListener
+	ClusterTriggerBindings []*v1beta1.ClusterTriggerBinding
+	EventListeners         []*v1beta1.EventListener
 	ClusterInterceptors    []*v1alpha1.ClusterInterceptor
-	TriggerBindings        []*v1alpha1.TriggerBinding
-	TriggerTemplates       []*v1alpha1.TriggerTemplate
-	Triggers               []*v1alpha1.Trigger
+	Interceptors           []*v1alpha1.Interceptor
+	TriggerBindings        []*v1beta1.TriggerBinding
+	TriggerTemplates       []*v1beta1.TriggerTemplate
+	Triggers               []*v1beta1.Trigger
 	Deployments            []*appsv1.Deployment
 	Services               []*corev1.Service
-	ConfigMaps             []*corev1.ConfigMap
 	Secrets                []*corev1.Secret
 	ServiceAccounts        []*corev1.ServiceAccount
 	Pods                   []*corev1.Pod
@@ -82,13 +88,10 @@ type Resources struct {
 
 // Clients holds references to clients which are useful for reconciler tests.
 type Clients struct {
-	Kube                *fakekubeclientset.Clientset
-	Triggers            *faketriggersclientset.Clientset
-	Pipeline            *fakepipelineclientset.Clientset
-	Resource            *fakeresourceclientset.Clientset
-	Dynamic             *dynamicclientset.Clientset
-	DynamicClient       *fakedynamic.FakeDynamicClient
-	DuckInformerFactory duck.InformerFactory
+	Kube          *fakekubeclientset.Clientset
+	Triggers      *faketriggersclientset.Clientset
+	Pipeline      *fakepipelineclientset.Clientset
+	DynamicClient *fakedynamic.FakeDynamicClient
 }
 
 // Assets holds references to the controller and clients.
@@ -97,17 +100,33 @@ type Assets struct {
 	Clients    Clients
 }
 
+func init() {
+	// Register a separate fake dynamic client with out schemes.
+	injection.Fake.RegisterClient(func(ctx context.Context, cfg *rest.Config) context.Context {
+		scheme := runtime.NewScheme()
+		err := servingv1.AddToScheme(scheme)
+		if err != nil {
+			panic(err.Error())
+		}
+		ctx, _ = fakedynamicclientset.With(ctx, scheme)
+		return ctx
+	})
+}
+
+func SetupFakeContext(t testing.TB) (context.Context, []controller.Informer) {
+	return rtesting.SetupFakeContext(t, func(ctx context.Context) context.Context {
+		return filteredinformerfactory.WithSelectors(ctx, labels.FormatLabels(resources.DefaultStaticResourceLabels))
+	})
+}
+
 // SeedResources returns Clients populated with the given Resources
-// nolint: golint
+// nolint: revive
 func SeedResources(t *testing.T, ctx context.Context, r Resources) Clients {
 	t.Helper()
-	dynamicClient := fakedynamic.NewSimpleDynamicClient(runtime.NewScheme())
 	c := Clients{
 		Kube:          fakekubeclient.Get(ctx),
 		Triggers:      faketriggersclient.Get(ctx),
 		Pipeline:      fakepipelineclient.Get(ctx),
-		Resource:      fakeresourceclient.Get(ctx),
-		Dynamic:       dynamicclientset.New(tekton.WithClient(dynamicClient)),
 		DynamicClient: fakedynamicclientset.Get(ctx),
 	}
 
@@ -118,12 +137,12 @@ func SeedResources(t *testing.T, ctx context.Context, r Resources) Clients {
 	ctbInformer := fakeclustertriggerbindinginformer.Get(ctx)
 	elInformer := fakeeventlistenerinformer.Get(ctx)
 	icInformer := fakeClusterInterceptorinformer.Get(ctx)
+	nsicInformer := fakeInterceptorinformer.Get(ctx)
 	ttInformer := faketriggertemplateinformer.Get(ctx)
 	tbInformer := faketriggerbindinginformer.Get(ctx)
 	trInformer := faketriggerinformer.Get(ctx)
-	deployInformer := fakedeployinformer.Get(ctx)
-	serviceInformer := fakeserviceinformer.Get(ctx)
-	configMapInformer := fakeconfigmapinformer.Get(ctx)
+	deployInformer := fakefiltereddeployinformer.Get(ctx, labels.FormatLabels(resources.DefaultStaticResourceLabels))
+	serviceInformer := fakefilteredserviceinformer.Get(ctx, labels.FormatLabels(resources.DefaultStaticResourceLabels))
 	secretInformer := fakesecretinformer.Get(ctx)
 	saInformer := fakeserviceaccountinformer.Get(ctx)
 	podInformer := fakepodinformer.Get(ctx)
@@ -140,7 +159,7 @@ func SeedResources(t *testing.T, ctx context.Context, r Resources) Clients {
 		if err := ctbInformer.Informer().GetIndexer().Add(ctb); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := c.Triggers.TriggersV1alpha1().ClusterTriggerBindings().Create(context.Background(), ctb, metav1.CreateOptions{}); err != nil {
+		if _, err := c.Triggers.TriggersV1beta1().ClusterTriggerBindings().Create(context.Background(), ctb, metav1.CreateOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -148,7 +167,7 @@ func SeedResources(t *testing.T, ctx context.Context, r Resources) Clients {
 		if err := elInformer.Informer().GetIndexer().Add(el); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := c.Triggers.TriggersV1alpha1().EventListeners(el.Namespace).Create(context.Background(), el, metav1.CreateOptions{}); err != nil {
+		if _, err := c.Triggers.TriggersV1beta1().EventListeners(el.Namespace).Create(context.Background(), el, metav1.CreateOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -160,11 +179,19 @@ func SeedResources(t *testing.T, ctx context.Context, r Resources) Clients {
 			t.Fatal(err)
 		}
 	}
+	for _, ic := range r.Interceptors {
+		if err := nsicInformer.Informer().GetIndexer().Add(ic); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Triggers.TriggersV1alpha1().Interceptors(ic.Namespace).Create(context.Background(), ic, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, tb := range r.TriggerBindings {
 		if err := tbInformer.Informer().GetIndexer().Add(tb); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := c.Triggers.TriggersV1alpha1().TriggerBindings(tb.Namespace).Create(context.Background(), tb, metav1.CreateOptions{}); err != nil {
+		if _, err := c.Triggers.TriggersV1beta1().TriggerBindings(tb.Namespace).Create(context.Background(), tb, metav1.CreateOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -172,7 +199,7 @@ func SeedResources(t *testing.T, ctx context.Context, r Resources) Clients {
 		if err := ttInformer.Informer().GetIndexer().Add(tt); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := c.Triggers.TriggersV1alpha1().TriggerTemplates(tt.Namespace).Create(context.Background(), tt, metav1.CreateOptions{}); err != nil {
+		if _, err := c.Triggers.TriggersV1beta1().TriggerTemplates(tt.Namespace).Create(context.Background(), tt, metav1.CreateOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -180,7 +207,7 @@ func SeedResources(t *testing.T, ctx context.Context, r Resources) Clients {
 		if err := trInformer.Informer().GetIndexer().Add(tr); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := c.Triggers.TriggersV1alpha1().Triggers(tr.Namespace).Create(context.Background(), tr, metav1.CreateOptions{}); err != nil {
+		if _, err := c.Triggers.TriggersV1beta1().Triggers(tr.Namespace).Create(context.Background(), tr, metav1.CreateOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -198,15 +225,6 @@ func SeedResources(t *testing.T, ctx context.Context, r Resources) Clients {
 		}
 
 		if _, err := c.Kube.CoreV1().Services(svc.Namespace).Create(context.Background(), svc, metav1.CreateOptions{}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	for _, cfg := range r.ConfigMaps {
-		if err := configMapInformer.Informer().GetIndexer().Add(cfg); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := c.Kube.CoreV1().ConfigMaps(cfg.Namespace).Create(context.Background(), cfg, metav1.CreateOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -272,7 +290,7 @@ func SeedResources(t *testing.T, ctx context.Context, r Resources) Clients {
 func GetResourcesFromClients(c Clients) (*Resources, error) {
 	testResources := &Resources{}
 	// Add ClusterTriggerBindings
-	ctbList, err := c.Triggers.TriggersV1alpha1().ClusterTriggerBindings().List(context.Background(), metav1.ListOptions{})
+	ctbList, err := c.Triggers.TriggersV1beta1().ClusterTriggerBindings().List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -287,7 +305,7 @@ func GetResourcesFromClients(c Clients) (*Resources, error) {
 		// Add Namespace
 		testResources.Namespaces = append(testResources.Namespaces, ns.DeepCopy())
 		// Add EventListeners
-		elList, err := c.Triggers.TriggersV1alpha1().EventListeners(ns.Name).List(context.Background(), metav1.ListOptions{})
+		elList, err := c.Triggers.TriggersV1beta1().EventListeners(ns.Name).List(context.Background(), metav1.ListOptions{})
 		if err != nil {
 			return nil, err
 		}
@@ -295,7 +313,7 @@ func GetResourcesFromClients(c Clients) (*Resources, error) {
 			testResources.EventListeners = append(testResources.EventListeners, el.DeepCopy())
 		}
 		// Add TriggerBindings
-		tbList, err := c.Triggers.TriggersV1alpha1().TriggerBindings(ns.Name).List(context.Background(), metav1.ListOptions{})
+		tbList, err := c.Triggers.TriggersV1beta1().TriggerBindings(ns.Name).List(context.Background(), metav1.ListOptions{})
 		if err != nil {
 			return nil, err
 		}
@@ -303,7 +321,7 @@ func GetResourcesFromClients(c Clients) (*Resources, error) {
 			testResources.TriggerBindings = append(testResources.TriggerBindings, tb.DeepCopy())
 		}
 		// Add TriggerTemplates
-		ttList, err := c.Triggers.TriggersV1alpha1().TriggerTemplates(ns.Name).List(context.Background(), metav1.ListOptions{})
+		ttList, err := c.Triggers.TriggersV1beta1().TriggerTemplates(ns.Name).List(context.Background(), metav1.ListOptions{})
 		if err != nil {
 			return nil, err
 		}
@@ -326,14 +344,6 @@ func GetResourcesFromClients(c Clients) (*Resources, error) {
 		for _, svc := range svcList.Items {
 			testResources.Services = append(testResources.Services, svc.DeepCopy())
 		}
-		// Add ConfigMaps
-		cfgList, err := c.Kube.CoreV1().ConfigMaps(ns.Name).List(context.Background(), metav1.ListOptions{})
-		if err != nil {
-			return nil, err
-		}
-		for _, cfg := range cfgList.Items {
-			testResources.ConfigMaps = append(testResources.ConfigMaps, cfg.DeepCopy())
-		}
 		// Add Secrets
 		secretsList, err := c.Kube.CoreV1().Secrets(ns.Name).List(context.Background(), metav1.ListOptions{})
 		if err != nil {
@@ -343,7 +353,7 @@ func GetResourcesFromClients(c Clients) (*Resources, error) {
 			testResources.Secrets = append(testResources.Secrets, s.DeepCopy())
 		}
 		// Get Triggers
-		trList, err := c.Triggers.TriggersV1alpha1().Triggers(ns.Name).List(context.Background(), metav1.ListOptions{})
+		trList, err := c.Triggers.TriggersV1beta1().Triggers(ns.Name).List(context.Background(), metav1.ListOptions{})
 		if err != nil {
 			return nil, err
 		}

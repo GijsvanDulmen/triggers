@@ -20,10 +20,14 @@ import (
 	"context"
 	"os"
 
+	defaultconfig "github.com/tektoncd/triggers/pkg/apis/config"
+	"github.com/tektoncd/triggers/pkg/apis/triggers/contexts"
 	"github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
+	"github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"knative.dev/pkg/configmap"
 	"knative.dev/pkg/controller"
+	"knative.dev/pkg/injection"
 	"knative.dev/pkg/injection/sharedmain"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/signals"
@@ -38,13 +42,23 @@ import (
 var types = map[schema.GroupVersionKind]resourcesemantics.GenericCRD{
 	v1alpha1.SchemeGroupVersion.WithKind("ClusterTriggerBinding"): &v1alpha1.ClusterTriggerBinding{},
 	v1alpha1.SchemeGroupVersion.WithKind("ClusterInterceptor"):    &v1alpha1.ClusterInterceptor{},
+	v1alpha1.SchemeGroupVersion.WithKind("Interceptor"):           &v1alpha1.Interceptor{},
 	v1alpha1.SchemeGroupVersion.WithKind("EventListener"):         &v1alpha1.EventListener{},
 	v1alpha1.SchemeGroupVersion.WithKind("TriggerBinding"):        &v1alpha1.TriggerBinding{},
 	v1alpha1.SchemeGroupVersion.WithKind("TriggerTemplate"):       &v1alpha1.TriggerTemplate{},
 	v1alpha1.SchemeGroupVersion.WithKind("Trigger"):               &v1alpha1.Trigger{},
+
+	v1beta1.SchemeGroupVersion.WithKind("ClusterTriggerBinding"): &v1beta1.ClusterTriggerBinding{},
+	v1beta1.SchemeGroupVersion.WithKind("EventListener"):         &v1beta1.EventListener{},
+	v1beta1.SchemeGroupVersion.WithKind("TriggerBinding"):        &v1beta1.TriggerBinding{},
+	v1beta1.SchemeGroupVersion.WithKind("TriggerTemplate"):       &v1beta1.TriggerTemplate{},
+	v1beta1.SchemeGroupVersion.WithKind("Trigger"):               &v1beta1.Trigger{},
 }
 
 func NewDefaultingAdmissionController(ctx context.Context, cmw configmap.Watcher) *controller.Impl {
+	// Decorate contexts with the current state of the config.
+	store := defaultconfig.NewStore(logging.FromContext(ctx).Named("config-store"))
+	store.WatchConfigs(cmw)
 	return defaulting.NewAdmissionController(ctx,
 
 		// Name of the resource webhook.
@@ -57,7 +71,9 @@ func NewDefaultingAdmissionController(ctx context.Context, cmw configmap.Watcher
 		types,
 
 		// A function that infuses the context passed to Validate/SetDefaults with custom metadata.
-		v1alpha1.WithUpgradeViaDefaulting,
+		func(ctx context.Context) context.Context {
+			return contexts.WithUpgradeViaDefaulting(store.ToContext(ctx))
+		},
 
 		// Whether to disallow unknown fields.
 		true,
@@ -65,6 +81,9 @@ func NewDefaultingAdmissionController(ctx context.Context, cmw configmap.Watcher
 }
 
 func NewValidationAdmissionController(ctx context.Context, cmw configmap.Watcher) *controller.Impl {
+	// Decorate contexts with the current state of the config.
+	store := defaultconfig.NewStore(logging.FromContext(ctx).Named("config-store"))
+	store.WatchConfigs(cmw)
 	return validation.NewAdmissionController(ctx,
 
 		// Name of the resource webhook.
@@ -78,13 +97,15 @@ func NewValidationAdmissionController(ctx context.Context, cmw configmap.Watcher
 
 		// A function that infuses the context passed to Validate/SetDefaults with custom metadata.
 		func(ctx context.Context) context.Context {
-			return ctx
+			return contexts.WithUpgradeViaDefaulting(store.ToContext(ctx))
 		},
 
 		// Whether to disallow unknown fields.
 		true,
 	)
 }
+
+// revive:disable:unused-parameter
 
 func NewConfigValidationController(ctx context.Context, cmw configmap.Watcher) *controller.Impl {
 	return configmaps.NewAdmissionController(ctx,
@@ -96,7 +117,8 @@ func NewConfigValidationController(ctx context.Context, cmw configmap.Watcher) *
 		"/config-validation",
 
 		configmap.Constructors{
-			logging.ConfigMapName(): logging.NewConfigFromConfigMap,
+			logging.ConfigMapName():               logging.NewConfigFromConfigMap,
+			defaultconfig.GetDefaultsConfigName(): defaultconfig.NewDefaultsFromConfigMap,
 		},
 	)
 }
@@ -115,15 +137,15 @@ func main() {
 	// Set up a signal context with our webhook options
 	ctx := webhook.WithOptions(signals.NewContext(), webhook.Options{
 		ServiceName: serviceName,
-		Port:        8443,
+		Port:        webhook.PortFromEnv(8443),
 		SecretName:  secretName,
 	})
 
 	// NOTE(afrittoli) - we should have the name "webhook-triggers"
 	// configurable. Once the change is done on knative/pkg side
 	// knative/eventing#4530 we can inherit it from it
-	sharedmain.WebhookMainWithConfig(ctx, "webhook-triggers",
-		sharedmain.ParseAndGetConfigOrDie(),
+	sharedmain.MainWithConfig(ctx, "webhook-triggers",
+		injection.ParseAndGetRESTConfigOrDie(),
 		certificates.NewController,
 		NewDefaultingAdmissionController,
 		NewValidationAdmissionController,

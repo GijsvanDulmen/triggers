@@ -21,6 +21,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic/fake"
+	k8sscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 
 	"knative.dev/pkg/injection"
@@ -33,7 +34,9 @@ func init() {
 }
 
 func withClient(ctx context.Context, cfg *rest.Config) context.Context {
-	ctx, _ = With(ctx, runtime.NewScheme())
+	scheme := runtime.NewScheme()
+	k8sscheme.AddToScheme(scheme)
+	ctx, _ = With(ctx, scheme)
 	return ctx
 }
 

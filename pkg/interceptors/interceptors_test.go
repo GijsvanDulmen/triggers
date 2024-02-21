@@ -18,8 +18,9 @@ package interceptors_test
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -28,21 +29,18 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	pipelinev1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
-	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
+	"github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
+	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
 	"github.com/tektoncd/triggers/pkg/interceptors"
+	"github.com/tektoncd/triggers/pkg/interceptors/cel"
 	"github.com/tektoncd/triggers/pkg/interceptors/server"
 	"github.com/tektoncd/triggers/test"
 	"go.uber.org/zap/zaptest"
 	"google.golang.org/grpc/codes"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"knative.dev/pkg/apis"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
-	fakekubeclient "knative.dev/pkg/client/injection/kube/client/fake"
-	rtesting "knative.dev/pkg/reconciler/testing"
 )
-
-const testNS = "testing-ns"
 
 func TestGetInterceptorParams(t *testing.T) {
 	for _, tc := range []struct {
@@ -52,74 +50,90 @@ func TestGetInterceptorParams(t *testing.T) {
 	}{{
 		name: "cel",
 		in: triggersv1.EventInterceptor{
-			DeprecatedCEL: &triggersv1.CELInterceptor{
-				Filter: `header.match("foo", "bar")`,
-				Overlays: []triggersv1.CELOverlay{{
+			Ref: triggersv1.InterceptorRef{Name: "cel"},
+			Params: []triggersv1.InterceptorParams{{
+				Name:  "filter",
+				Value: test.ToV1JSON(t, `header.match("foo", "bar")`),
+			}, {
+				Name: "overlays",
+				Value: test.ToV1JSON(t, []cel.Overlay{{
 					Key:        "short_sha",
 					Expression: "body.ref.truncate(7)",
-				}},
-			},
+				}}),
+			}},
 		},
 		want: map[string]interface{}{
-			"filter": `header.match("foo", "bar")`,
-			"overlays": []triggersv1.CELOverlay{{
+			"filter": test.ToV1JSON(t, `header.match("foo", "bar")`),
+			"overlays": test.ToV1JSON(t, []cel.Overlay{{
 				Key:        "short_sha",
 				Expression: "body.ref.truncate(7)",
-			}},
+			}}),
 		},
 	}, {
 		name: "gitlab",
 		in: triggersv1.EventInterceptor{
-			DeprecatedGitLab: &triggersv1.GitLabInterceptor{
-				SecretRef: &triggersv1.SecretRef{
+			Ref: triggersv1.InterceptorRef{Name: "gitlab"},
+			Params: []triggersv1.InterceptorParams{{
+				Name: "secretRef",
+				Value: test.ToV1JSON(t, &triggersv1.SecretRef{
 					SecretKey:  "test-secret",
 					SecretName: "token",
-				},
-				EventTypes: []string{"push"},
-			},
+				}),
+			}, {
+				Name:  "eventTypes",
+				Value: test.ToV1JSON(t, []string{"push"}),
+			}},
 		},
 		want: map[string]interface{}{
-			"eventTypes": []string{"push"},
-			"secretRef": &triggersv1.SecretRef{
+			"eventTypes": test.ToV1JSON(t, []string{"push"}),
+			"secretRef": test.ToV1JSON(t, &triggersv1.SecretRef{
 				SecretKey:  "test-secret",
 				SecretName: "token",
-			},
+			}),
 		},
 	}, {
 		name: "github",
 		in: triggersv1.EventInterceptor{
-			DeprecatedGitHub: &triggersv1.GitHubInterceptor{
-				SecretRef: &triggersv1.SecretRef{
+			Ref: triggersv1.InterceptorRef{Name: "github"},
+			Params: []triggersv1.InterceptorParams{{
+				Name: "secretRef",
+				Value: test.ToV1JSON(t, &triggersv1.SecretRef{
 					SecretKey:  "test-secret",
 					SecretName: "token",
-				},
-				EventTypes: []string{"push"},
-			},
+				}),
+			}, {
+				Name:  "eventTypes",
+				Value: test.ToV1JSON(t, []string{"push"}),
+			}},
 		},
 		want: map[string]interface{}{
-			"eventTypes": []string{"push"},
-			"secretRef": &triggersv1.SecretRef{
+			"eventTypes": test.ToV1JSON(t, []string{"push"}),
+			"secretRef": test.ToV1JSON(t, &triggersv1.SecretRef{
 				SecretKey:  "test-secret",
 				SecretName: "token",
-			},
+			}),
 		},
 	}, {
 		name: "bitbucket",
 		in: triggersv1.EventInterceptor{
-			DeprecatedBitbucket: &triggersv1.BitbucketInterceptor{
-				SecretRef: &triggersv1.SecretRef{
+			Ref: triggersv1.InterceptorRef{Name: "bitbucket"},
+			Params: []triggersv1.InterceptorParams{{
+				Name: "secretRef",
+				Value: test.ToV1JSON(t, &triggersv1.SecretRef{
 					SecretKey:  "test-secret",
 					SecretName: "token",
-				},
-				EventTypes: []string{"push"},
-			},
+				}),
+			}, {
+				Name:  "eventTypes",
+				Value: test.ToV1JSON(t, []string{"push"}),
+			}},
 		},
 		want: map[string]interface{}{
-			"eventTypes": []string{"push"},
-			"secretRef": &triggersv1.SecretRef{
+			"eventTypes": test.ToV1JSON(t, []string{"push"}),
+			"secretRef": test.ToV1JSON(t, &triggersv1.SecretRef{
 				SecretKey:  "test-secret",
 				SecretName: "token",
-			},
+			}),
 		},
 	}, {
 		name: "webhook",
@@ -133,7 +147,7 @@ func TestGetInterceptorParams(t *testing.T) {
 				},
 				Header: []pipelinev1.Param{{
 					Name: "p1",
-					Value: pipelinev1.ArrayOrString{
+					Value: pipelinev1.ParamValue{
 						Type:     pipelinev1.ParamTypeArray,
 						ArrayVal: []string{"v1", "v2"},
 					},
@@ -149,7 +163,7 @@ func TestGetInterceptorParams(t *testing.T) {
 			},
 			"header": []pipelinev1.Param{{
 				Name: "p1",
-				Value: pipelinev1.ArrayOrString{
+				Value: pipelinev1.ParamValue{
 					Type:     pipelinev1.ParamTypeArray,
 					ArrayVal: []string{"v1", "v2"},
 				},
@@ -267,63 +281,6 @@ func TestGetInterceptorParams_Error(t *testing.T) {
 	}
 }
 
-func TestGetSecretToken(t *testing.T) {
-	tests := []struct {
-		name   string
-		cache  map[string]interface{}
-		wanted []byte
-	}{{
-		name:   "no matching cache entry exists",
-		cache:  make(map[string]interface{}),
-		wanted: []byte("secret from API"),
-	}, {
-		name: "a matching cache entry exists",
-		cache: map[string]interface{}{
-			fmt.Sprintf("secret/%s/test-secret/token", testNS): []byte("secret from cache"),
-		},
-		wanted: []byte("secret from cache"),
-	}}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(rt *testing.T) {
-			req := &http.Request{}
-			req = req.WithContext(context.WithValue(req.Context(), interceptors.RequestCacheKey, tt.cache))
-
-			ctx, _ := rtesting.SetupFakeContext(t)
-			kubeClient := fakekubeclient.Get(ctx)
-			secretRef := triggersv1.SecretRef{
-				SecretKey:  "token",
-				SecretName: "test-secret",
-			}
-
-			if _, err := kubeClient.CoreV1().Secrets(testNS).Create(context.Background(), makeSecret("secret from API"), metav1.CreateOptions{}); err != nil {
-				rt.Error(err)
-			}
-
-			secret, err := interceptors.GetSecretToken(req, kubeClient, &secretRef, testNS)
-			if err != nil {
-				rt.Error(err)
-			}
-
-			if diff := cmp.Diff(tt.wanted, secret); diff != "" {
-				rt.Errorf("secret value (-want, +got) = %s", diff)
-			}
-		})
-	}
-}
-
-func makeSecret(secretText string) *corev1.Secret {
-	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: testNS,
-			Name:      "test-secret",
-		},
-		Data: map[string][]byte{
-			"token": []byte(secretText),
-		},
-	}
-}
-
 func TestResolveToURL(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -332,9 +289,9 @@ func TestResolveToURL(t *testing.T) {
 		want   string
 	}{{
 		name: "ClusterInterceptor has status.address.url",
-		getter: func(n string) (*triggersv1.ClusterInterceptor, error) {
-			return &triggersv1.ClusterInterceptor{
-				Status: triggersv1.ClusterInterceptorStatus{
+		getter: func(n string) (*v1alpha1.ClusterInterceptor, error) {
+			return &v1alpha1.ClusterInterceptor{
+				Status: v1alpha1.ClusterInterceptorStatus{
 					AddressStatus: duckv1.AddressStatus{
 						Address: &duckv1.Addressable{
 							URL: &apis.URL{
@@ -351,10 +308,10 @@ func TestResolveToURL(t *testing.T) {
 		want:  "http://some-host/cel",
 	}, {
 		name: "ClusterInterceptor does not have a status",
-		getter: func(n string) (*triggersv1.ClusterInterceptor, error) {
-			return &triggersv1.ClusterInterceptor{
-				Spec: triggersv1.ClusterInterceptorSpec{
-					ClientConfig: triggersv1.ClientConfig{
+		getter: func(n string) (*v1alpha1.ClusterInterceptor, error) {
+			return &v1alpha1.ClusterInterceptor{
+				Spec: v1alpha1.ClusterInterceptorSpec{
+					ClientConfig: v1alpha1.ClientConfig{
 						URL: &apis.URL{
 							Scheme: "http",
 							Host:   "some-host",
@@ -381,25 +338,25 @@ func TestResolveToURL(t *testing.T) {
 	}
 
 	t.Run("interceptor has no URL", func(t *testing.T) {
-		fakeGetter := func(name string) (*triggersv1.ClusterInterceptor, error) {
-			return &triggersv1.ClusterInterceptor{
-				Spec: triggersv1.ClusterInterceptorSpec{
-					ClientConfig: triggersv1.ClientConfig{
+		fakeGetter := func(name string) (*v1alpha1.ClusterInterceptor, error) {
+			return &v1alpha1.ClusterInterceptor{
+				Spec: v1alpha1.ClusterInterceptorSpec{
+					ClientConfig: v1alpha1.ClientConfig{
 						URL: nil,
 					},
 				},
 			}, nil
 		}
 		_, err := interceptors.ResolveToURL(fakeGetter, "cel")
-		if !errors.Is(err, triggersv1.ErrNilURL) {
-			t.Fatalf("ResolveToURL expected error to be %s but got %s", triggersv1.ErrNilURL, err)
+		if !errors.Is(err, v1alpha1.ErrNilURL) {
+			t.Fatalf("ResolveToURL expected error to be %s but got %s", v1alpha1.ErrNilURL, err)
 		}
 	})
 }
 
 // testServer creates a httptest server with the passed in handler and returns a http.Client that
 // can be used to talk to these interceptors
-func testServer(t testing.TB, handler http.Handler) *http.Client {
+func testServer(t testing.TB, handler http.Handler, d ...*http.Transport) *http.Client {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(func() {
@@ -410,8 +367,12 @@ func testServer(t testing.TB, handler http.Handler) *http.Client {
 	if err != nil {
 		t.Fatalf("testServer() url parse err: %v", err)
 	}
-	httpClient.Transport = &http.Transport{
-		Proxy: http.ProxyURL(u),
+	if d != nil {
+		httpClient.Transport = d[0] // as we are passing only one data so referring 0th index
+	} else {
+		httpClient.Transport = &http.Transport{
+			Proxy: http.ProxyURL(u),
+		}
 	}
 	return httpClient
 }
@@ -521,10 +482,29 @@ func TestExecute_Error(t *testing.T) {
 		svr: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`not_json`))
 		}),
+	}, {
+		name: "HTTPS URL",
+		req:  defaultReq,
+		url:  "https://interceptorurl.com",
+		svr:  coreInterceptors,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
-			client := testServer(t, tc.svr)
-			got, err := interceptors.Execute(context.Background(), client, tc.req, tc.url)
+			var (
+				got *triggersv1.InterceptorResponse
+				err error
+			)
+			if strings.Contains(tc.url, "https") {
+				client := testServer(t, tc.svr, &http.Transport{
+					TLSClientConfig: &tls.Config{
+						RootCAs:    x509.NewCertPool(),
+						MinVersion: tls.VersionTLS13, // Added MinVersion to avoid  G402: TLS MinVersion too low. (gosec)
+					},
+				})
+				got, err = interceptors.Execute(context.Background(), client, tc.req, tc.url)
+			} else {
+				client := testServer(t, tc.svr)
+				got, err = interceptors.Execute(context.Background(), client, tc.req, tc.url)
+			}
 			if err == nil {
 				t.Fatalf("Execute() did not get expected error. Response was %+v", got)
 			}

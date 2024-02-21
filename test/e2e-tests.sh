@@ -20,8 +20,14 @@
 source $(dirname $0)/e2e-common.sh
 # Script entry point.
 
-initialize $@
+# Setting defaults
 failed=0
+SKIP_INITIALIZE=${SKIP_INITIALIZE:="false"}
+
+
+if [ "${SKIP_INITIALIZE}" != "true" ]; then
+  initialize $@
+fi
 
 header "Setting up environment"
 install_pipeline_crd
@@ -37,6 +43,9 @@ $(dirname $0)/e2e-tests-ingress.sh || failed=1
 header "Running Go e2e tests"
 go_test_e2e -timeout=20m ./test || failed=1
 go_test_e2e -timeout=20m ./cmd/... || failed=1
+
+header "Running examples tests"
+$(dirname $0)/e2e-tests-examples.sh || failed=1
 
 (( failed )) && fail_test
 success

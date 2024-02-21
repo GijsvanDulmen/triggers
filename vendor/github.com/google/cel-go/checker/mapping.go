@@ -15,27 +15,25 @@
 package checker
 
 import (
-	"fmt"
-
-	exprpb "google.golang.org/genproto/googleapis/api/expr/v1alpha1"
+	"github.com/google/cel-go/common/types"
 )
 
 type mapping struct {
-	mapping map[string]*exprpb.Type
+	mapping map[string]*types.Type
 }
 
 func newMapping() *mapping {
 	return &mapping{
-		mapping: make(map[string]*exprpb.Type),
+		mapping: make(map[string]*types.Type),
 	}
 }
 
-func (m *mapping) add(from *exprpb.Type, to *exprpb.Type) {
-	m.mapping[typeKey(from)] = to
+func (m *mapping) add(from, to *types.Type) {
+	m.mapping[FormatCELType(from)] = to
 }
 
-func (m *mapping) find(from *exprpb.Type) (*exprpb.Type, bool) {
-	if r, found := m.mapping[typeKey(from)]; found {
+func (m *mapping) find(from *types.Type) (*types.Type, bool) {
+	if r, found := m.mapping[FormatCELType(from)]; found {
 		return r, found
 	}
 	return nil, false
@@ -48,15 +46,4 @@ func (m *mapping) copy() *mapping {
 		c.mapping[k] = v
 	}
 	return c
-}
-
-func (m *mapping) String() string {
-	result := "{"
-
-	for k, v := range m.mapping {
-		result += fmt.Sprintf("%v => %v   ", k, v)
-	}
-
-	result += "}"
-	return result
 }

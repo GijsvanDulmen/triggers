@@ -17,6 +17,8 @@ limitations under the License.
 package v1beta1
 
 import (
+	"fmt"
+
 	"github.com/tektoncd/pipeline/pkg/substitution"
 	"k8s.io/apimachinery/pkg/selection"
 )
@@ -25,14 +27,21 @@ import (
 // to determine whether the Task should be executed or skipped
 type WhenExpression struct {
 	// Input is the string for guard checking which can be a static input or an output from a parent Task
-	Input string `json:"input"`
+	Input string `json:"input,omitempty"`
 
 	// Operator that represents an Input's relationship to the values
-	Operator selection.Operator `json:"operator"`
+	Operator selection.Operator `json:"operator,omitempty"`
 
 	// Values is an array of strings, which is compared against the input, for guard checking
 	// It must be non-empty
-	Values []string `json:"values"`
+	// +listType=atomic
+	Values []string `json:"values,omitempty"`
+
+	// CEL is a string of Common Language Expression, which can be used to conditionally execute
+	// the task based on the result of the expression evaluation
+	// More info about CEL syntax: https://github.com/google/cel-spec/blob/master/doc/langdef.md
+	// +optional
+	CEL string `json:"cel,omitempty"`
 }
 
 func (we *WhenExpression) isInputInValues() bool {
@@ -52,28 +61,33 @@ func (we *WhenExpression) isTrue() bool {
 	return !we.isInputInValues()
 }
 
-func (we *WhenExpression) hasVariable() bool {
-	if _, hasVariable := we.GetVarSubstitutionExpressions(); hasVariable {
-		return true
-	}
-	return false
-}
-
-func (we *WhenExpression) applyReplacements(replacements map[string]string) WhenExpression {
+func (we *WhenExpression) applyReplacements(replacements map[string]string, arrayReplacements map[string][]string) WhenExpression {
 	replacedInput := substitution.ApplyReplacements(we.Input, replacements)
+	replacedCEL := substitution.ApplyReplacements(we.CEL, replacements)
 
 	var replacedValues []string
 	for _, val := range we.Values {
-		replacedValues = append(replacedValues, substitution.ApplyReplacements(val, replacements))
+		// arrayReplacements holds a list of array parameters with a pattern - params.arrayParam1
+		// array params are referenced using $(params.arrayParam1[*])
+		// array results are referenced using $(results.resultname[*])
+		// check if the param exist in the arrayReplacements to replace it with a list of values
+		if _, ok := arrayReplacements[fmt.Sprintf("%s.%s", ParamsPrefix, ArrayReference(val))]; ok {
+			replacedValues = append(replacedValues, substitution.ApplyArrayReplacements(val, replacements, arrayReplacements)...)
+		} else if _, ok := arrayReplacements[ResultsArrayReference(val)]; ok {
+			replacedValues = append(replacedValues, substitution.ApplyArrayReplacements(val, replacements, arrayReplacements)...)
+		} else {
+			replacedValues = append(replacedValues, substitution.ApplyReplacements(val, replacements))
+		}
 	}
 
-	return WhenExpression{Input: replacedInput, Operator: we.Operator, Values: replacedValues}
+	return WhenExpression{Input: replacedInput, Operator: we.Operator, Values: replacedValues, CEL: replacedCEL}
 }
 
 // GetVarSubstitutionExpressions extracts all the values between "$(" and ")" in a When Expression
 func (we *WhenExpression) GetVarSubstitutionExpressions() ([]string, bool) {
 	var allExpressions []string
 	allExpressions = append(allExpressions, validateString(we.Input)...)
+	allExpressions = append(allExpressions, validateString(we.CEL)...)
 	for _, value := range we.Values {
 		allExpressions = append(allExpressions, validateString(value)...)
 	}
@@ -87,32 +101,23 @@ type WhenExpressions []WhenExpression
 // AllowsExecution evaluates an Input's relationship to an array of Values, based on the Operator,
 // to determine whether all the When Expressions are True. If they are all True, the guarded Task is
 // executed, otherwise it is skipped.
-func (wes WhenExpressions) AllowsExecution() bool {
+// If CEL expression exists, AllowsExecution will get the evaluated results from evaluatedCEL and determine
+// if the Task should be skipped.
+func (wes WhenExpressions) AllowsExecution(evaluatedCEL map[string]bool) bool {
 	for _, we := range wes {
-		if !we.isTrue() {
+		if !we.isTrue() || (we.CEL != "" && !evaluatedCEL[we.CEL]) {
 			return false
 		}
 	}
 	return true
 }
 
-// HaveVariables indicates whether When Expressions contains variables, such as Parameters
-// or Results in the Inputs or Values.
-func (wes WhenExpressions) HaveVariables() bool {
-	for _, we := range wes {
-		if we.hasVariable() {
-			return true
-		}
-	}
-	return false
-}
-
-// ReplaceWhenExpressionsVariables interpolates variables, such as Parameters and Results, in
+// ReplaceVariables interpolates variables, such as Parameters and Results, in
 // the Input and Values.
-func (wes WhenExpressions) ReplaceWhenExpressionsVariables(replacements map[string]string) WhenExpressions {
+func (wes WhenExpressions) ReplaceVariables(replacements map[string]string, arrayReplacements map[string][]string) WhenExpressions {
 	replaced := wes
 	for i := range wes {
-		replaced[i] = wes[i].applyReplacements(replacements)
+		replaced[i] = wes[i].applyReplacements(replacements, arrayReplacements)
 	}
 	return replaced
 }

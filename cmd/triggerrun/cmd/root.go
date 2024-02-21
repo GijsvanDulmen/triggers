@@ -24,14 +24,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
+	"sync"
 
 	"github.com/spf13/cobra"
-	"github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
-	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
+	"github.com/tektoncd/triggers/pkg/apis/triggers"
+	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
 	triggersclientset "github.com/tektoncd/triggers/pkg/client/clientset/versioned"
 	dynamicClientset "github.com/tektoncd/triggers/pkg/client/dynamic/clientset"
 	"github.com/tektoncd/triggers/pkg/client/dynamic/clientset/tekton"
@@ -40,6 +40,7 @@ import (
 	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/serializer/streaming"
+	"knative.dev/pkg/logging"
 
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -69,6 +70,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&kubeconfig, "kubeconfig", "k", "", "absolute path to the kubeconfig file")
 }
 
+// revive:disable:unused-parameter
+
 func rootRun(cmd *cobra.Command, args []string) error {
 	err := trigger(triggerFile, httpPath, action, kubeconfig, os.Stdout)
 	if err != nil {
@@ -85,10 +88,10 @@ func trigger(triggerFile, httpPath, action, kubeconfig string, writer io.Writer)
 		return fmt.Errorf("error reading HTTP txt file: %w", err)
 	}
 
-	// Read triggers.
-	triggers, err := readTrigger(triggerFile)
+	// Read triggerConfigs.
+	triggerConfigs, err := readTrigger(triggerFile)
 	if err != nil {
-		return fmt.Errorf("error reading triggers: %w", err)
+		return fmt.Errorf("error reading triggerConfigs: %w", err)
 	}
 
 	kubeClient, triggerClient, err := getKubeClient(kubeconfig)
@@ -101,12 +104,12 @@ func trigger(triggerFile, httpPath, action, kubeconfig string, writer io.Writer)
 		return fmt.Errorf("Failed to build config from the flags: %w", err)
 	}
 
-	logger, _ := zap.NewProduction()
-	sugerLogger := logger.Sugar()
+	ctx := context.Background()
+	logger := logging.FromContext(ctx)
 	eventID := template.UUID()
-	r := newSink(config, sugerLogger)
-	eventLog := sugerLogger.With(zap.String(triggersv1.EventIDLabelKey, eventID))
-	for _, tri := range triggers {
+	r := newSink(ctx, config)
+	eventLog := logger.With(zap.String(triggers.EventIDLabelKey, eventID))
+	for _, tri := range triggerConfigs {
 		resources, err := processTriggerSpec(kubeClient, triggerClient, tri,
 			request, body, eventID, eventLog, r)
 		if err != nil {
@@ -138,16 +141,16 @@ func trigger(triggerFile, httpPath, action, kubeconfig string, writer io.Writer)
 	return nil
 }
 
-func readTrigger(path string) ([]*v1alpha1.Trigger, error) {
+func readTrigger(path string) ([]*triggersv1.Trigger, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("error reading trigger file: %w", err)
 	}
 	defer f.Close()
 
-	var list []*v1alpha1.Trigger
+	var list []*triggersv1.Trigger
 	decoder := streaming.NewDecoder(f, scheme.Codecs.UniversalDecoder())
-	b := new(v1alpha1.Trigger)
+	b := new(triggersv1.Trigger)
 	for err == nil {
 		_, _, err = decoder.Decode(nil, b)
 		if err != nil {
@@ -177,13 +180,13 @@ func readHTTP(path string) (*http.Request, []byte, error) {
 		return nil, nil, fmt.Errorf("error reading HTTP file: %w", err)
 	}
 
-	body, err := ioutil.ReadAll(request.Body)
+	body, err := io.ReadAll(request.Body)
 	defer request.Body.Close()
 	if err != nil {
 		return nil, nil, fmt.Errorf("error reading HTTP body: %w", err)
 	}
 
-	request.Body = ioutil.NopCloser(bytes.NewReader(body))
+	request.Body = io.NopCloser(bytes.NewReader(body))
 
 	return request, body, err
 }
@@ -193,9 +196,9 @@ func processTriggerSpec(kubeClient kubernetes.Interface, client triggersclientse
 		return nil, errors.New("trigger is not defined")
 	}
 
-	log := eventLog.With(zap.String(triggersv1.TriggerLabelKey, r.EventListenerName))
+	log := eventLog.With(zap.String(triggers.TriggerLabelKey, r.EventListenerName))
 
-	finalPayload, header, iresp, err := r.ExecuteInterceptors(*tri, request, body, log, eventID)
+	finalPayload, header, iresp, err := r.ExecuteTriggerInterceptors(*tri, request, body, log, eventID, map[string]interface{}{})
 	if err != nil {
 		log.Error(err)
 		return nil, err
@@ -212,13 +215,13 @@ func processTriggerSpec(kubeClient kubernetes.Interface, client triggersclientse
 
 	rt, err := template.ResolveTrigger(*tri,
 		func(name string) (*triggersv1.TriggerBinding, error) {
-			return client.TriggersV1alpha1().TriggerBindings(tri.Namespace).Get(context.Background(), name, metav1.GetOptions{})
+			return client.TriggersV1beta1().TriggerBindings(tri.Namespace).Get(context.Background(), name, metav1.GetOptions{})
 		},
 		func(name string) (*triggersv1.ClusterTriggerBinding, error) {
-			return client.TriggersV1alpha1().ClusterTriggerBindings().Get(context.Background(), name, metav1.GetOptions{})
+			return client.TriggersV1beta1().ClusterTriggerBindings().Get(context.Background(), name, metav1.GetOptions{})
 		},
 		func(name string) (*triggersv1.TriggerTemplate, error) {
-			return client.TriggersV1alpha1().TriggerTemplates(tri.Namespace).Get(context.Background(), name, metav1.GetOptions{})
+			return client.TriggersV1beta1().TriggerTemplates(tri.Namespace).Get(context.Background(), name, metav1.GetOptions{})
 		})
 	if err != nil {
 		log.Error("Failed to resolve Trigger: ", err)
@@ -228,7 +231,7 @@ func processTriggerSpec(kubeClient kubernetes.Interface, client triggersclientse
 	if iresp != nil && iresp.Extensions != nil {
 		extensions = iresp.Extensions
 	}
-	params, err := template.ResolveParams(rt, finalPayload, header, extensions)
+	params, err := template.ResolveParams(rt, finalPayload, header, extensions, template.NewTriggerContext(eventID))
 	if err != nil {
 		log.Error("Failed to resolve parameters", err)
 		return nil, err
@@ -240,8 +243,8 @@ func processTriggerSpec(kubeClient kubernetes.Interface, client triggersclientse
 	return resources, nil
 }
 
-func newSink(config *rest.Config, sugerLogger *zap.SugaredLogger) sink.Sink {
-	sinkClients, err := sink.ConfigureClients(config)
+func newSink(ctx context.Context, config *rest.Config) sink.Sink {
+	sinkClients, err := sink.ConfigureClients(ctx, config)
 	if err != nil {
 		log.Fatalf("Failed to get the sink client: %v", err)
 	}
@@ -261,9 +264,10 @@ func newSink(config *rest.Config, sugerLogger *zap.SugaredLogger) sink.Sink {
 		KubeClientSet:          kubeClient,
 		HTTPClient:             http.DefaultClient,
 		Auth:                   sink.DefaultAuthOverride{},
+		WGProcessTriggers:      &sync.WaitGroup{},
 		DiscoveryClient:        sinkClients.DiscoveryClient,
 		DynamicClient:          dynamicCS,
-		Logger:                 sugerLogger,
+		Logger:                 logging.FromContext(ctx),
 		EventListenerNamespace: "default",
 	}
 

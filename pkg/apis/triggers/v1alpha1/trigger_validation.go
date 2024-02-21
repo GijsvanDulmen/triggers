@@ -29,10 +29,11 @@ import (
 
 // Validate validates a Trigger
 func (t *Trigger) Validate(ctx context.Context) *apis.FieldError {
-	errs := validate.ObjectMetadata(t.GetObjectMeta()).ViaField("metadata")
 	if apis.IsInDelete(ctx) {
 		return nil
 	}
+
+	errs := validate.ObjectMetadata(t.GetObjectMeta()).ViaField("metadata")
 	return errs.Also(t.Spec.validate(ctx).ViaField("spec"))
 }
 
@@ -49,6 +50,8 @@ func (t *TriggerSpec) validate(ctx context.Context) *apis.FieldError {
 
 	return errs
 }
+
+// revive:disable:unused-parameter
 
 func (t TriggerSpecTemplate) validate(ctx context.Context) (errs *apis.FieldError) {
 	// Optional explicit match

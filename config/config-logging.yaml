@@ -26,6 +26,7 @@ data:
     {
       "level": "info",
       "development": false,
+      "disableStacktrace": true,
       "sampling": {
         "initial": 100,
         "thereafter": 100
@@ -34,11 +35,11 @@ data:
       "errorOutputPaths": ["stderr"],
       "encoding": "json",
       "encoderConfig": {
-        "timeKey": "ts",
-        "levelKey": "level",
+        "timeKey": "timestamp",
+        "levelKey": "severity",
         "nameKey": "logger",
         "callerKey": "caller",
-        "messageKey": "msg",
+        "messageKey": "message",
         "stacktraceKey": "stacktrace",
         "lineEnding": "",
         "levelEncoder": "",

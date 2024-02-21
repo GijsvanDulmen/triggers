@@ -8,8 +8,8 @@ the triggers repo, a terminal window and a text editor.
 
 1. `cd` to root of Triggers git checkout.
 
-1. 1. Make sure the release `Task` and `Pipeline` are up-to-date on the
-      cluster.
+1. Make sure the release `Task` and `Pipeline` are up-to-date on the
+   cluster.
 
    - [publish-triggers-release](https://github.com/tektoncd/triggers/blob/main/tekton/publish.yaml)
 
@@ -36,7 +36,7 @@ the triggers repo, a terminal window and a text editor.
 1. Confirm commit SHA matches what you want to release.
 
     ```bash
-    git show $TEKTON_RELEASE_GIT_SHA
+    git show $TRIGGERS_RELEASE_GIT_SHA
     ```
 
 1. Create a workspace template file:
@@ -86,7 +86,7 @@ the triggers repo, a terminal window and a text editor.
    (...)
    ```
 
-   The `commit-sha` should match `$TEKTON_RELEASE_GIT_SHA`.
+   The `commit-sha` should match `$TRIGGERS_RELEASE_GIT_SHA`.
    The two URLs can be opened in the browser or via `curl` to download the release manifests.
 
     1. The YAMLs are now released! Anyone installing Tekton Triggers will now get the new version. Time to create a new GitHub release announcement:
@@ -98,36 +98,29 @@ the triggers repo, a terminal window and a text editor.
     TEKTON_PACKAGE=tektoncd/triggers
     ```
 
-    1. Create a `PipelineResource` of type `git`
+    1. Find the Rekor UUID for the release
 
-    ```shell
-    cat <<EOF | kubectl --context dogfooding create -f -
-    apiVersion: tekton.dev/v1alpha1
-    kind: PipelineResource
-    metadata:
-      name: tekton-triggers-$(echo $VERSION_TAG | tr '.' '-')
-      namespace: default
-    spec:
-      type: git
-      params:
-        - name: url
-          value: 'https://github.com/tektoncd/triggers'
-        - name: revision
-          value: ${TRIGGERS_RELEASE_GIT_SHA}
-    EOF
+    ```bash
+    RELEASE_FILE=https://storage.googleapis.com/tekton-releases/triggers/previous/${VERSION_TAG}/release.yaml
+    CONTROLLER_IMAGE_SHA=$(curl $RELEASE_FILE | sed -n 's/"//g;s/.*gcr\.io.*controller.*@//p;')
+    REKOR_UUID=$(rekor-cli search --sha $CONTROLLER_IMAGE_SHA | grep -v Found | head -1)
+    echo -e "CONTROLLER_IMAGE_SHA: ${CONTROLLER_IMAGE_SHA}\nREKOR_UUID: ${REKOR_UUID}"
     ```
 
     1. Execute the Draft Release task.
 
     ```bash
-    tkn --context dogfooding task start \
-      -i source="tekton-triggers-$(echo $VERSION_TAG | tr '.' '-')" \
-      -i release-bucket=tekton-triggers-bucket \
-      -p package=tektoncd/triggers \
-      -p release-tag="${VERSION_TAG}" \
-      -p previous-release-tag="${TRIGGERS_OLD_VERSION}" \
-      -p release-name="Tekton Triggers" \
-      create-draft-release
+    tkn --context dogfooding pipeline start \
+        --workspace name=shared,volumeClaimTemplateFile=workspace-template.yaml \
+        --workspace name=credentials,secret=release-secret \
+        -p package="${TEKTON_PACKAGE}" \
+        -p git-revision="${TRIGGERS_RELEASE_GIT_SHA}" \
+        -p release-tag="${VERSION_TAG}" \
+        -p previous-release-tag="${TRIGGERS_OLD_VERSION}" \
+        -p release-name="Tekton Triggers" \
+        -p bucket="gs://tekton-releases/triggers" \
+        -p rekor-uuid="$REKOR_UUID" \
+        release-draft
     ```
 
     1. Watch logs of create-draft-release
@@ -137,14 +130,38 @@ the triggers repo, a terminal window and a text editor.
       1. Double-check that the list of commits here matches your expectations
          for the release. You might need to remove incorrect commits or copy/paste commits
          from the release branch. Refer to previous releases to confirm the expected format.
+      1. In the section **Installation one-liner**, add the install instruction for interceptors also. 
+         ```bash
+            kubectl apply -f https://storage.googleapis.com/tekton-releases/triggers/previous/${VERSION_TAG}/interceptors.yaml
+         ```
+      1. In the section **Attestation**, modify it for inteceptors.yaml also.
+         ```bash
+         RELEASE_FILE=https://storage.googleapis.com/tekton-releases/triggers/previous/${VERSION_TAG}/release.yaml
+         INTERCEPTORS_FILE=https://storage.googleapis.com/tekton-releases/triggers/previous/${VERSION_TAG}/interceptors.yaml
+         REKOR_UUID=$REKOR_UUID
 
+         # Obtains the list of images with sha from the attestation
+         REKOR_ATTESTATION_IMAGES=$(rekor-cli get --uuid "$REKOR_UUID" --format json | jq -r .Attestation | jq -r '.subject[]|.name + ":v0.23.0@sha256:" + .digest.sha256')
+
+
+         # Download the release file
+         curl "$RELEASE_FILE" > release.yaml
+         curl "$INTERCEPTORS_FILE" >> release.yaml
+          ```
     1. Un-check the "This is a pre-release" checkbox since you're making a legit for-reals release!
 
     1. Publish the GitHub release once all notes are correct and in order.
 
-1. Edit `README.md` on `master` branch, add entry to docs table with latest release links.
+1. Edit `releases.md` on the `main` branch, add an entry for the release.
+   - In case of a patch release, replace the latest release with the new one,
+     including links to docs and examples. Append the new release to the list
+     of patch releases as well.
+   - In case of a minor or major release, add a new entry for the
+     release, including links to docs and example
+   - Check if any release is EOL, if so move it to the "End of Life Releases"
+     section
 
-1. Push & make PR for updated `README.md`
+1. Push & make PR for updated `releases.md`
 
 1. Test release that you just made against your own cluster (note `--context my-dev-cluster`):
 
@@ -161,7 +178,10 @@ the triggers repo, a terminal window and a text editor.
     kubectl --context my-dev-cluster apply --filename https://storage.googleapis.com/tekton-releases/triggers/previous/v0.12.1/interceptors.yaml
     ```
 
-1. Announce the release in Slack channels #general, #trigers and #announcements.
+1. For major releases, the [website sync configuration](https://github.com/tektoncd/website/blob/main/sync/config/triggers.yaml)
+   to include the new release.
+
+1. Announce the release in Slack channels #general, #triggers and #announcements.
 
 Congratulations, you're done!
 
@@ -183,6 +203,6 @@ Congratulations, you're done!
 
 ## Important: Switch `kubectl` back to your own cluster by default.
 
-    ```bash
-    kubectl config use-context my-dev-cluster
-    ```
+```bash
+kubectl config use-context my-dev-cluster
+```

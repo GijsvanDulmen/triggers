@@ -19,7 +19,7 @@ package webhook
 import (
 	"bytes"
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -28,7 +28,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	pipelinev1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
-	"github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
+	"github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	"knative.dev/pkg/apis"
 )
@@ -68,7 +68,7 @@ func TestWebHookInterceptor(t *testing.T) {
 			Proxy: http.ProxyURL(interceptorURL),
 		},
 	}
-	webhook := &v1alpha1.WebhookInterceptor{
+	webhook := &v1beta1.WebhookInterceptor{
 		ObjectRef: &corev1.ObjectReference{
 			APIVersion: "v1",
 			Kind:       "Service",
@@ -76,7 +76,7 @@ func TestWebHookInterceptor(t *testing.T) {
 		},
 		Header: []pipelinev1.Param{{
 			Name: "Param-Header",
-			Value: pipelinev1.ArrayOrString{
+			Value: pipelinev1.ParamValue{
 				Type:      pipelinev1.ParamTypeString,
 				StringVal: "val",
 			}},
@@ -84,14 +84,14 @@ func TestWebHookInterceptor(t *testing.T) {
 	}
 	i := NewInterceptor(webhook, client, "default", nil)
 
-	incoming, _ := http.NewRequest("POST", "http://doesnotmatter.example.com", payload)
+	incoming, _ := http.NewRequest(http.MethodPost, "http://doesnotmatter.example.com", payload)
 	incoming.Header.Add("Content-type", "application/json")
 	resp, err := i.ExecuteTrigger(incoming)
 	if err != nil {
 		t.Fatalf("ExecuteTrigger: %v", err)
 	}
 
-	resPayload, _ := ioutil.ReadAll(resp.Body)
+	resPayload, _ := io.ReadAll(resp.Body)
 	defer resp.Body.Close()
 	if diff := cmp.Diff(wantPayload, resPayload); diff != "" {
 		t.Errorf("response payload (-want, +got) = %s", diff)
@@ -127,7 +127,7 @@ func TestWebHookInterceptor_NotOK(t *testing.T) {
 			Proxy: http.ProxyURL(interceptorURL),
 		},
 	}
-	webhook := &v1alpha1.WebhookInterceptor{
+	webhook := &v1beta1.WebhookInterceptor{
 		ObjectRef: &corev1.ObjectReference{
 			APIVersion: "v1",
 			Kind:       "Service",
@@ -136,7 +136,7 @@ func TestWebHookInterceptor_NotOK(t *testing.T) {
 	}
 	i := NewInterceptor(webhook, client, "default", nil)
 
-	incoming, _ := http.NewRequest("POST", "http://doesnotmatter.example.com", payload)
+	incoming, _ := http.NewRequest(http.MethodPost, "http://doesnotmatter.example.com", payload)
 	resp, err := i.ExecuteTrigger(incoming)
 	if err == nil || resp.StatusCode != http.StatusAccepted {
 		got, _ := httputil.DumpResponse(resp, true)
@@ -149,12 +149,12 @@ func TestGetURI(t *testing.T) {
 	var eventListenerNs = "default"
 	tcs := []struct {
 		name     string
-		ref      v1alpha1.WebhookInterceptor
+		ref      v1beta1.WebhookInterceptor
 		expected string
 		wantErr  bool
 	}{{
 		name: "namespace specified",
-		ref: v1alpha1.WebhookInterceptor{
+		ref: v1beta1.WebhookInterceptor{
 			ObjectRef: &corev1.ObjectReference{
 				Kind:       "Service",
 				Name:       "foo",
@@ -165,7 +165,7 @@ func TestGetURI(t *testing.T) {
 		wantErr:  false,
 	}, {
 		name: "no namespace",
-		ref: v1alpha1.WebhookInterceptor{
+		ref: v1beta1.WebhookInterceptor{
 			ObjectRef: &corev1.ObjectReference{
 				Kind:       "Service",
 				Name:       "foo",
@@ -175,7 +175,7 @@ func TestGetURI(t *testing.T) {
 		wantErr:  false,
 	}, {
 		name: "non services",
-		ref: v1alpha1.WebhookInterceptor{
+		ref: v1beta1.WebhookInterceptor{
 			ObjectRef: &corev1.ObjectReference{
 				Kind:       "Blah",
 				Name:       "foo",
@@ -185,7 +185,7 @@ func TestGetURI(t *testing.T) {
 		wantErr:  true,
 	}, {
 		name: "webhook interceptor with url",
-		ref: v1alpha1.WebhookInterceptor{
+		ref: v1beta1.WebhookInterceptor{
 			URL: apis.HTTP("foo.default.svc"),
 		},
 		expected: "http://foo.default.svc",
@@ -234,7 +234,7 @@ func Test_addInterceptorHeaders(t *testing.T) {
 			},
 			headerParams: []pipelinev1.Param{{
 				Name: "header2",
-				Value: pipelinev1.ArrayOrString{
+				Value: pipelinev1.ParamValue{
 					Type:      pipelinev1.ParamTypeString,
 					StringVal: "val",
 				}},
@@ -252,7 +252,7 @@ func Test_addInterceptorHeaders(t *testing.T) {
 			},
 			headerParams: []pipelinev1.Param{{
 				Name: "header2",
-				Value: pipelinev1.ArrayOrString{
+				Value: pipelinev1.ParamValue{
 					Type:     pipelinev1.ParamTypeArray,
 					ArrayVal: []string{"val1", "val2"},
 				}},
@@ -270,7 +270,7 @@ func Test_addInterceptorHeaders(t *testing.T) {
 			},
 			headerParams: []pipelinev1.Param{{
 				Name: "header1",
-				Value: pipelinev1.ArrayOrString{
+				Value: pipelinev1.ParamValue{
 					Type:     pipelinev1.ParamTypeArray,
 					ArrayVal: []string{"new_val"},
 				}},

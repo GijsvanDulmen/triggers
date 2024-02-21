@@ -31,10 +31,12 @@ import (
 // and TriggerSpecTemplate; TriggerSpecBinding provides extracted values for
 // TriggerSpecTemplate to then create resources from.
 type TriggerSpec struct {
+	// +listType=atomic
 	Bindings []*TriggerSpecBinding `json:"bindings"`
 	Template TriggerSpecTemplate   `json:"template"`
 	// +optional
-	Name         string                `json:"name,omitempty"`
+	Name string `json:"name,omitempty"`
+	// +listType=atomic
 	Interceptors []*TriggerInterceptor `json:"interceptors,omitempty"`
 	// ServiceAccountName optionally associates credentials with each trigger;
 	// Unlike EventListeners, this should be scoped to the same namespace
@@ -92,6 +94,7 @@ type TriggerInterceptor struct {
 	// Ref refers to the Interceptor to use
 	Ref InterceptorRef `json:"ref"`
 	// Params are the params to send to the interceptor
+	// +listType=atomic
 	Params []InterceptorParams `json:"params,omitempty"`
 
 	// WebhookInterceptor refers to an old style webhook interceptor service
@@ -115,8 +118,6 @@ type InterceptorRef struct {
 	// Name of the referent; More info: http://kubernetes.io/docs/user-guide/identifiers#names
 	Name string `json:"name,omitempty"`
 	// InterceptorKind indicates the kind of the Interceptor, namespaced or cluster scoped.
-	// Currently only InterceptorKind is ClusterInterceptor, so the only valid value
-	// is the default one
 	// +optional
 	Kind InterceptorKind `json:"kind,omitempty"`
 	// API version of the referent
@@ -128,8 +129,10 @@ type InterceptorRef struct {
 type InterceptorKind string
 
 const (
-	// ClusterTaskKind indicates that task type has a cluster scope.
+	// ClusterInterceptorKind indicates that Interceptor type has a cluster scope.
 	ClusterInterceptorKind InterceptorKind = "ClusterInterceptor"
+	// NamespacedInterceptorKind indicated that interceptor has a namespaced scope
+	NamespacedInterceptorKind InterceptorKind = "NamespacedInterceptor"
 )
 
 func (ti *TriggerInterceptor) defaultInterceptorKind() {
@@ -239,30 +242,35 @@ type WebhookInterceptor struct {
 	// Header is a group of key-value pairs that can be appended to the
 	// interceptor request headers. This allows the interceptor to make
 	// decisions specific to an EventListenerTrigger.
+	// +listType=atomic
 	Header []v1beta1.Param `json:"header,omitempty"`
 }
 
 // BitbucketInterceptor provides a webhook to intercept and pre-process events
 type BitbucketInterceptor struct {
-	SecretRef  *SecretRef `json:"secretRef,omitempty"`
-	EventTypes []string   `json:"eventTypes,omitempty"`
+	SecretRef *SecretRef `json:"secretRef,omitempty"`
+	// +listType=atomic
+	EventTypes []string `json:"eventTypes,omitempty"`
 }
 
 // GitHubInterceptor provides a webhook to intercept and pre-process events
 type GitHubInterceptor struct {
-	SecretRef  *SecretRef `json:"secretRef,omitempty"`
-	EventTypes []string   `json:"eventTypes,omitempty"`
+	SecretRef *SecretRef `json:"secretRef,omitempty"`
+	// +listType=atomic
+	EventTypes []string `json:"eventTypes,omitempty"`
 }
 
 // GitLabInterceptor provides a webhook to intercept and pre-process events
 type GitLabInterceptor struct {
-	SecretRef  *SecretRef `json:"secretRef,omitempty"`
-	EventTypes []string   `json:"eventTypes,omitempty"`
+	SecretRef *SecretRef `json:"secretRef,omitempty"`
+	// +listType=atomic
+	EventTypes []string `json:"eventTypes,omitempty"`
 }
 
 // CELInterceptor provides a webhook to intercept and pre-process events
 type CELInterceptor struct {
-	Filter   string       `json:"filter,omitempty"`
+	Filter string `json:"filter,omitempty"`
+	// +listType=atomic
 	Overlays []CELOverlay `json:"overlays,omitempty"`
 }
 

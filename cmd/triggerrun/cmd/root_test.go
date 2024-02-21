@@ -23,23 +23,20 @@ import (
 	"net/http/httputil"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
-	"go.uber.org/zap/zaptest"
-
 	"github.com/google/go-cmp/cmp"
-	pipelinev1alpha1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1alpha1"
-	"github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
-	"github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
-	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
+	pipelinev1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
+	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
 	triggersclientset "github.com/tektoncd/triggers/pkg/client/clientset/versioned"
 	"github.com/tektoncd/triggers/pkg/sink"
 	"github.com/tektoncd/triggers/test"
+	"go.uber.org/zap/zaptest"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"knative.dev/pkg/ptr"
-	rtesting "knative.dev/pkg/reconciler/testing"
 )
 
 func TestTrigger_Error(t *testing.T) {
@@ -60,7 +57,7 @@ func TestReadTrigger(t *testing.T) {
 		t.Fatalf("failed to read trigger:%+v", err)
 	}
 
-	want := []*v1alpha1.Trigger{{
+	want := []*triggersv1.Trigger{{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "triggers.tekton.dev/v1alpha1",
 			Kind:       "Trigger",
@@ -68,11 +65,11 @@ func TestReadTrigger(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "trigger-run",
 		},
-		Spec: v1alpha1.TriggerSpec{
-			Bindings: []*v1alpha1.TriggerSpecBinding{
+		Spec: triggersv1.TriggerSpec{
+			Bindings: []*triggersv1.TriggerSpecBinding{
 				{Ref: "git-event-binding"},
 			},
-			Template: v1alpha1.TriggerSpecTemplate{
+			Template: triggersv1.TriggerSpecTemplate{
 				Ref: ptr.String("simple-pipeline-template"),
 			},
 		},
@@ -125,11 +122,11 @@ func Test_processTriggerSpec(t *testing.T) {
 		resources test.Resources
 	}
 	eventBody := json.RawMessage(`{"repository": {"links": {"clone": [{"href": "testurl", "name": "ssh"}, {"href": "testurl", "name": "http"}]}}, "changes": [{"ref": {"displayId": "test-branch"}}]}`)
-	r, err := http.NewRequest("POST", "URL", bytes.NewReader(eventBody))
+	r, err := http.NewRequest(http.MethodPost, "URL", bytes.NewReader(eventBody))
 	if err != nil {
 		t.Errorf("Cannot create a new request:%s", err)
 	}
-	taskRunTemplate := pipelinev1alpha1.TaskRun{
+	taskRunTemplate := pipelinev1.TaskRun{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "tekton.dev/v1alpha1",
 			Kind:       "TaskRun",
@@ -141,8 +138,8 @@ func Test_processTriggerSpec(t *testing.T) {
 				"someLabel": "$(tt.params.foo)",
 			},
 		},
-		Spec: pipelinev1alpha1.TaskRunSpec{
-			TaskRef: &v1beta1.TaskRef{
+		Spec: pipelinev1.TaskRunSpec{
+			TaskRef: &pipelinev1.TaskRef{
 				Name: "my-task", // non-existent task; just for testing
 			},
 		},
@@ -167,7 +164,7 @@ func Test_processTriggerSpec(t *testing.T) {
 		},
 	}
 
-	triggerBinding := v1alpha1.TriggerBinding{
+	triggerBinding := triggersv1.TriggerBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "git-event-binding",
 			Namespace: "default",
@@ -180,7 +177,7 @@ func Test_processTriggerSpec(t *testing.T) {
 		},
 	}
 
-	wantTaskRun := pipelinev1alpha1.TaskRun{
+	wantTaskRun := pipelinev1.TaskRun{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "tekton.dev/v1alpha1",
 			Kind:       "TaskRun",
@@ -192,7 +189,7 @@ func Test_processTriggerSpec(t *testing.T) {
 				"someLabel": "bar", // replaced with the value of foo from bar
 			},
 		},
-		Spec: pipelinev1alpha1.TaskRunSpec{
+		Spec: pipelinev1.TaskRunSpec{
 			TaskRef: taskRunTemplate.Spec.TaskRef, // non-existent task; just for testing
 		},
 	}
@@ -209,20 +206,20 @@ func Test_processTriggerSpec(t *testing.T) {
 	}{{
 		name: "testing-name",
 		args: args{
-			t: &v1alpha1.Trigger{
+			t: &triggersv1.Trigger{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "my-triggerRun",
 				},
-				Spec: v1alpha1.TriggerSpec{
-					Bindings: []*v1alpha1.TriggerSpecBinding{{Ref: "git-event-binding"}},                // These should be references to TriggerBindings defined below
-					Template: v1alpha1.TriggerSpecTemplate{Ref: ptr.String("simple-pipeline-template")}, // This should be a reference to a TriggerTemplate defined below
+				Spec: triggersv1.TriggerSpec{
+					Bindings: []*triggersv1.TriggerSpecBinding{{Ref: "git-event-binding"}},                // These should be references to TriggerBindings defined below
+					Template: triggersv1.TriggerSpecTemplate{Ref: ptr.String("simple-pipeline-template")}, // This should be a reference to a TriggerTemplate defined below
 				},
 			},
 			request: r,
 			event:   eventBody,
 			resources: test.Resources{
 				// Add any resources that we need to create with a fake client
-				TriggerBindings:  []*v1alpha1.TriggerBinding{&triggerBinding},
+				TriggerBindings:  []*triggersv1.TriggerBinding{&triggerBinding},
 				TriggerTemplates: []*triggersv1.TriggerTemplate{&triggerTemplate},
 			},
 		},
@@ -235,8 +232,9 @@ func Test_processTriggerSpec(t *testing.T) {
 			logger := zaptest.NewLogger(t).Sugar()
 			kubeClient, triggerClient := getFakeTriggersClient(t, tt.args.resources)
 			s := sink.Sink{
-				KubeClientSet: kubeClient,
-				HTTPClient:    http.DefaultClient,
+				KubeClientSet:     kubeClient,
+				HTTPClient:        http.DefaultClient,
+				WGProcessTriggers: &sync.WaitGroup{},
 			}
 			got, err := processTriggerSpec(kubeClient, triggerClient, tt.args.t, tt.args.request, tt.args.event, eventID, logger, s)
 			if (err != nil) != tt.wantErr {
@@ -253,7 +251,7 @@ func Test_processTriggerSpec(t *testing.T) {
 
 func getFakeTriggersClient(t *testing.T, resources test.Resources) (kubernetes.Interface, triggersclientset.Interface) {
 	t.Helper()
-	ctx, _ := rtesting.SetupFakeContext(t)
+	ctx, _ := test.SetupFakeContext(t)
 	clients := test.SeedResources(t, ctx, resources)
 	return clients.Kube, clients.Triggers
 }

@@ -17,36 +17,34 @@ limitations under the License.
 package gitlab
 
 import (
-	"context"
 	"net/http"
 	"testing"
 
-	"go.uber.org/zap/zaptest"
-
-	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
+	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
+	"github.com/tektoncd/triggers/pkg/interceptors"
+	"github.com/tektoncd/triggers/test"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	fakekubeclient "knative.dev/pkg/client/injection/kube/client/fake"
-	rtesting "knative.dev/pkg/reconciler/testing"
 )
 
 func TestInterceptor_ExecuteTrigger_ShouldContinue(t *testing.T) {
 	tests := []struct {
 		name              string
-		interceptorParams *triggersv1.GitLabInterceptor
+		interceptorParams *InterceptorParams
 		payload           []byte
 		secret            *corev1.Secret
 		token             string
 		eventType         string
 	}{{
 		name:              "no secret",
-		interceptorParams: &triggersv1.GitLabInterceptor{},
+		interceptorParams: &InterceptorParams{},
 
 		payload: []byte("somepayload"),
 		token:   "foo",
 	}, {
 		name: "valid header for secret",
-		interceptorParams: &triggersv1.GitLabInterceptor{
+		interceptorParams: &InterceptorParams{
 			SecretRef: &triggersv1.SecretRef{
 				SecretName: "mysecret",
 				SecretKey:  "token",
@@ -65,7 +63,7 @@ func TestInterceptor_ExecuteTrigger_ShouldContinue(t *testing.T) {
 		payload: []byte("somepayload"),
 	}, {
 		name: "valid event",
-		interceptorParams: &triggersv1.GitLabInterceptor{
+		interceptorParams: &InterceptorParams{
 			EventTypes: []string{"foo", "bar"},
 		},
 
@@ -73,7 +71,7 @@ func TestInterceptor_ExecuteTrigger_ShouldContinue(t *testing.T) {
 		payload:   []byte("somepayload"),
 	}, {
 		name: "valid event, valid secret",
-		interceptorParams: &triggersv1.GitLabInterceptor{
+		interceptorParams: &InterceptorParams{
 			EventTypes: []string{"foo", "bar"},
 			SecretRef: &triggersv1.SecretRef{
 				SecretName: "mysecret",
@@ -94,9 +92,7 @@ func TestInterceptor_ExecuteTrigger_ShouldContinue(t *testing.T) {
 	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, _ := rtesting.SetupFakeContext(t)
-			logger := zaptest.NewLogger(t)
-			kubeClient := fakekubeclient.Get(ctx)
+			ctx, _ := test.SetupFakeContext(t)
 			req := &triggersv1.InterceptorRequest{
 				Body: string(tt.payload),
 				Header: http.Header{
@@ -118,14 +114,13 @@ func TestInterceptor_ExecuteTrigger_ShouldContinue(t *testing.T) {
 			if tt.eventType != "" {
 				req.Header["X-GitLab-Event"] = []string{tt.eventType}
 			}
+			clientset := fakekubeclient.Get(ctx)
 			if tt.secret != nil {
-				if _, err := kubeClient.CoreV1().Secrets(metav1.NamespaceDefault).Create(context.Background(), tt.secret, metav1.CreateOptions{}); err != nil {
-					t.Error(err)
-				}
+				tt.secret.Namespace = metav1.NamespaceDefault
+				ctx, clientset = fakekubeclient.With(ctx, tt.secret)
 			}
-			w := &Interceptor{
-				KubeClientSet: kubeClient,
-				Logger:        logger.Sugar(),
+			w := &InterceptorImpl{
+				SecretGetter: interceptors.DefaultSecretGetter(clientset.CoreV1()),
 			}
 			res := w.Process(ctx, req)
 			if !res.Continue {
@@ -139,14 +134,14 @@ func TestInterceptor_ExecuteTrigger_ShouldContinue(t *testing.T) {
 func TestInterceptor_ExecuteTrigger_ShouldNotContinue(t *testing.T) {
 	tests := []struct {
 		name              string
-		interceptorParams *triggersv1.GitLabInterceptor
+		interceptorParams *InterceptorParams
 		payload           []byte
 		secret            *corev1.Secret
 		token             string
 		eventType         string
 	}{{
 		name: "invalid header for secret",
-		interceptorParams: &triggersv1.GitLabInterceptor{
+		interceptorParams: &InterceptorParams{
 			SecretRef: &triggersv1.SecretRef{
 				SecretName: "mysecret",
 				SecretKey:  "token",
@@ -165,7 +160,7 @@ func TestInterceptor_ExecuteTrigger_ShouldNotContinue(t *testing.T) {
 		payload: []byte("somepayload"),
 	}, {
 		name: "missing header for secret",
-		interceptorParams: &triggersv1.GitLabInterceptor{
+		interceptorParams: &InterceptorParams{
 			SecretRef: &triggersv1.SecretRef{
 				SecretName: "mysecret",
 				SecretKey:  "token",
@@ -182,7 +177,7 @@ func TestInterceptor_ExecuteTrigger_ShouldNotContinue(t *testing.T) {
 		payload: []byte("somepayload"),
 	}, {
 		name: "invalid event",
-		interceptorParams: &triggersv1.GitLabInterceptor{
+		interceptorParams: &InterceptorParams{
 			EventTypes: []string{"foo", "bar"},
 		},
 
@@ -190,7 +185,7 @@ func TestInterceptor_ExecuteTrigger_ShouldNotContinue(t *testing.T) {
 		payload:   []byte("somepayload"),
 	}, {
 		name: "valid event, invalid secret",
-		interceptorParams: &triggersv1.GitLabInterceptor{
+		interceptorParams: &InterceptorParams{
 			EventTypes: []string{"foo", "bar"},
 			SecretRef: &triggersv1.SecretRef{
 				SecretName: "mysecret",
@@ -211,7 +206,7 @@ func TestInterceptor_ExecuteTrigger_ShouldNotContinue(t *testing.T) {
 		},
 	}, {
 		name: "invalid event, valid secret",
-		interceptorParams: &triggersv1.GitLabInterceptor{
+		interceptorParams: &InterceptorParams{
 			EventTypes: []string{"foo", "bar"},
 			SecretRef: &triggersv1.SecretRef{
 				SecretName: "mysecret",
@@ -232,7 +227,7 @@ func TestInterceptor_ExecuteTrigger_ShouldNotContinue(t *testing.T) {
 		},
 	}, {
 		name: "empty secret",
-		interceptorParams: &triggersv1.GitLabInterceptor{
+		interceptorParams: &InterceptorParams{
 			SecretRef: &triggersv1.SecretRef{
 				SecretName: "mysecret",
 			},
@@ -248,9 +243,7 @@ func TestInterceptor_ExecuteTrigger_ShouldNotContinue(t *testing.T) {
 	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, _ := rtesting.SetupFakeContext(t)
-			logger := zaptest.NewLogger(t)
-			kubeClient := fakekubeclient.Get(ctx)
+			ctx, _ := test.SetupFakeContext(t)
 			req := &triggersv1.InterceptorRequest{
 				Body: string(tt.payload),
 				Header: http.Header{
@@ -272,14 +265,13 @@ func TestInterceptor_ExecuteTrigger_ShouldNotContinue(t *testing.T) {
 			if tt.eventType != "" {
 				req.Header["X-interceptorParams-Event"] = []string{tt.eventType}
 			}
+			clientset := fakekubeclient.Get(ctx)
 			if tt.secret != nil {
-				if _, err := kubeClient.CoreV1().Secrets(metav1.NamespaceDefault).Create(context.Background(), tt.secret, metav1.CreateOptions{}); err != nil {
-					t.Error(err)
-				}
+				tt.secret.Namespace = metav1.NamespaceDefault
+				ctx, clientset = fakekubeclient.With(ctx, tt.secret)
 			}
-			w := &Interceptor{
-				KubeClientSet: kubeClient,
-				Logger:        logger.Sugar(),
+			w := &InterceptorImpl{
+				SecretGetter: interceptors.DefaultSecretGetter(clientset.CoreV1()),
 			}
 			res := w.Process(ctx, req)
 			if res.Continue {
@@ -290,13 +282,10 @@ func TestInterceptor_ExecuteTrigger_ShouldNotContinue(t *testing.T) {
 }
 
 func TestInterceptor_Process_InvalidParams(t *testing.T) {
-	ctx, _ := rtesting.SetupFakeContext(t)
-	logger := zaptest.NewLogger(t)
-	kubeClient := fakekubeclient.Get(ctx)
+	ctx, _ := test.SetupFakeContext(t)
 
-	w := &Interceptor{
-		KubeClientSet: kubeClient,
-		Logger:        logger.Sugar(),
+	w := &InterceptorImpl{
+		SecretGetter: interceptors.DefaultSecretGetter(fakekubeclient.Get(ctx).CoreV1()),
 	}
 
 	req := &triggersv1.InterceptorRequest{

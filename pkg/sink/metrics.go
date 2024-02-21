@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"strconv"
 	"time"
 
 	"go.opencensus.io/stats"
@@ -20,8 +19,16 @@ var (
 		"http_duration_seconds",
 		"The eventlistener HTTP request duration",
 		stats.UnitDimensionless)
-	elDistribution     = view.Distribution(metrics.BucketsNBy10(0.001, 5)...)
+	elDistribution = view.Distribution(metrics.BucketsNBy10(0.001, 5)...)
+	eventCount     = stats.Float64("event_count",
+		"number of events received by sink",
+		stats.UnitDimensionless)
 	triggeredResources = stats.Int64("triggered_resources", "Count of the number of triggered eventlistener resources", stats.UnitDimensionless)
+)
+
+const (
+	failTag    = "failed"
+	successTag = "succeeded"
 )
 
 // NewRecorder creates a new metrics recorder instance
@@ -50,13 +57,18 @@ func NewRecorder() (*Recorder, error) {
 			Description: elDuration.Description(),
 			Measure:     elDuration,
 			Aggregation: elDistribution,
-			TagKeys:     []tag.Key{r.status},
 		},
 		&view.View{
 			Description: triggeredResources.Description(),
 			Measure:     triggeredResources,
 			Aggregation: view.Count(),
 			TagKeys:     []tag.Key{r.kind},
+		},
+		&view.View{
+			Description: eventCount.Description(),
+			Measure:     eventCount,
+			Aggregation: view.Count(),
+			TagKeys:     []tag.Key{r.status},
 		},
 	)
 	if err != nil {
@@ -76,19 +88,18 @@ func (s *Sink) NewMetricsRecorderInterceptor() MetricsInterceptor {
 			endTime := time.Now()
 			elapsed := endTime.Sub(startTime)
 			// Log the consumed time
-			go s.recordMetrics(recorder, elapsed)
+			go s.recordDurationMetrics(recorder, elapsed)
 		}()
 		next(recorder, r)
 	}
 }
 
-func (s *Sink) recordMetrics(w *StatusRecorder, elapsed time.Duration) {
+func (s *Sink) recordDurationMetrics(w *StatusRecorder, elapsed time.Duration) {
 
 	duration := elapsed.Seconds()
 	s.Logger.Debugw("event listener request completed", "status", w.Status, "duration", duration)
 	ctx, err := tag.New(
 		context.Background(),
-		tag.Insert(s.Recorder.status, strconv.Itoa(w.Status)),
 	)
 
 	if err != nil {
@@ -97,6 +108,22 @@ func (s *Sink) recordMetrics(w *StatusRecorder, elapsed time.Duration) {
 	}
 
 	metrics.Record(ctx, elDuration.M(duration))
+}
+
+func (s *Sink) recordCountMetrics(status string) {
+
+	s.Logger.Debugw("event listener request", "status", status)
+	ctx, err := tag.New(
+		context.Background(),
+		tag.Insert(s.Recorder.status, status),
+	)
+
+	if err != nil {
+		s.Logger.Warnf("failed to create tag for metric event_count: %w", err)
+		return
+	}
+
+	metrics.Record(ctx, eventCount.M(1))
 }
 
 func (s *Sink) recordResourceCreation(resources []json.RawMessage) {

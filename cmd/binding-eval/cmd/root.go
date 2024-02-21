@@ -21,14 +21,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"sort"
 
 	"github.com/spf13/cobra"
-	"github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
+	"github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
 	"github.com/tektoncd/triggers/pkg/template"
 	"k8s.io/apimachinery/pkg/runtime/serializer/streaming"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -53,6 +52,8 @@ func init() {
 	}
 }
 
+// revive:disable:unused-parameter
+
 func rootRun(cmd *cobra.Command, args []string) {
 	if err := evalBinding(os.Stdout, bindingPath, httpPath); err != nil {
 		log.Fatal(err)
@@ -72,7 +73,7 @@ func evalBinding(w io.Writer, bindingPath, httpPath string) error {
 		return fmt.Errorf("error reading bindings: %w", err)
 	}
 
-	bindingParams := []v1alpha1.Param{}
+	bindingParams := []v1beta1.Param{}
 	for _, b := range bindings {
 		bindingParams = append(bindingParams, b.Spec.Params...)
 	}
@@ -80,7 +81,7 @@ func evalBinding(w io.Writer, bindingPath, httpPath string) error {
 		BindingParams: bindingParams,
 	}
 
-	params, err := template.ResolveParams(t, body, r.Header, map[string]interface{}{})
+	params, err := template.ResolveParams(t, body, r.Header, map[string]interface{}{}, template.NewTriggerContext(""))
 	if err != nil {
 		return fmt.Errorf("error resolving params: %w", err)
 	}
@@ -99,16 +100,16 @@ func evalBinding(w io.Writer, bindingPath, httpPath string) error {
 	return nil
 }
 
-func readBindings(path string) ([]*v1alpha1.TriggerBinding, error) {
+func readBindings(path string) ([]*v1beta1.TriggerBinding, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("error reading binding file: %w", err)
 	}
 	defer f.Close()
 
-	var list []*v1alpha1.TriggerBinding
+	var list []*v1beta1.TriggerBinding
 	decoder := streaming.NewDecoder(f, scheme.Codecs.UniversalDecoder())
-	b := new(v1alpha1.TriggerBinding)
+	b := new(v1beta1.TriggerBinding)
 	for err == nil {
 		_, _, err = decoder.Decode(nil, b)
 		if err != nil {
@@ -138,7 +139,7 @@ func readHTTP(path string) (*http.Request, []byte, error) {
 		return nil, nil, fmt.Errorf("error reading request: %w", err)
 	}
 	defer req.Body.Close()
-	body, err := ioutil.ReadAll(req.Body)
+	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error reading HTTP body: %w", err)
 	}

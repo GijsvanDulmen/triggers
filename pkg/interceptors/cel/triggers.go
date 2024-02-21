@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-		http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,25 +16,24 @@ limitations under the License.
 package cel
 
 import (
+	"context"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strings"
 
 	"github.com/google/cel-go/cel"
-	"github.com/google/cel-go/checker/decls"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
+	"github.com/google/cel-go/common/types/traits"
 	"github.com/google/cel-go/interpreter/functions"
 	"github.com/tektoncd/triggers/pkg/interceptors"
-	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/yaml"
 
-	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
-	exprpb "google.golang.org/genproto/googleapis/api/expr/v1alpha1"
+	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
 )
 
 // Triggers returns a cel.EnvOption to configure extended functions for
@@ -69,18 +68,6 @@ import (
 // Examples:
 //
 //     header.canonical('X-Github-Event') // returns 'push'
-//
-// decodeb64
-//
-// Returns the base64 decoded representation of a string value.
-//
-// Returns an error if the value is not valid base64 data.
-//
-//     <string>.decodeb64() -> <string>
-//
-// Examples:
-//
-//     body.value.decodeb64() // returns decoded version
 //
 // truncate
 //
@@ -159,83 +146,73 @@ import (
 //
 // 		body.jsonObjectOrList.marshalJSON()
 
+// translate
+//
+// translate returns a copy of src, replacing matches of the with the replacement string repl. Inside repl, $ signs are interpreted as in Expand, so for instance $1 represents the text of the first submatch.
+//
+// 		<string>.translate(string, string) -> <string>
+//
+// Examples:
+//
+// 		"this is $aN INvalid5string ".replace("[^a-z0-9]+", "") == "thisisaninvalid5string"
+
 // Triggers creates and returns a new cel.Lib with the triggers extensions.
-func Triggers(ns string, k kubernetes.Interface) cel.EnvOption {
-	return cel.Lib(triggersLib{defaultNS: ns, client: k})
+func Triggers(ctx context.Context, ns string, sg interceptors.SecretGetter) cel.EnvOption {
+	return cel.Lib(triggersLib{ctx: ctx, defaultNS: ns, secretGetter: sg})
 }
 
 type triggersLib struct {
-	defaultNS string
-	client    kubernetes.Interface
+	ctx          context.Context
+	defaultNS    string
+	secretGetter interceptors.SecretGetter
 }
 
-func (triggersLib) CompileOptions() []cel.EnvOption {
-	mapStrDyn := decls.NewMapType(decls.String, decls.Dyn)
+func (t triggersLib) CompileOptions() []cel.EnvOption {
+	mapStrDyn := cel.MapType(cel.StringType, cel.DynType)
+	listStrDyn := cel.ListType(cel.DynType)
 	return []cel.EnvOption{
-		cel.Declarations(
-			decls.NewFunction("match",
-				decls.NewInstanceOverload("match_map_string_string",
-					[]*exprpb.Type{mapStrDyn, decls.String, decls.String}, decls.Bool)),
-			decls.NewFunction("canonical",
-				decls.NewInstanceOverload("canonical_map_string",
-					[]*exprpb.Type{mapStrDyn, decls.String}, decls.String)),
-			decls.NewFunction("decodeb64",
-				decls.NewInstanceOverload("decodeb64_string",
-					[]*exprpb.Type{decls.String}, decls.String)),
-			decls.NewFunction("truncate",
-				decls.NewInstanceOverload("truncate_string_uint",
-					[]*exprpb.Type{decls.String, decls.Int}, decls.String)),
-			decls.NewFunction("compareSecret",
-				decls.NewInstanceOverload("compareSecret_string_string_string",
-					[]*exprpb.Type{decls.String, decls.String, decls.String, decls.String}, decls.Bool)),
-			decls.NewFunction("parseJSON",
-				decls.NewInstanceOverload("parseJSON_string",
-					[]*exprpb.Type{decls.String}, mapStrDyn)),
-			decls.NewFunction("parseYAML",
-				decls.NewInstanceOverload("parseYAML_string",
-					[]*exprpb.Type{decls.String}, mapStrDyn)),
-			decls.NewFunction("parseURL",
-				decls.NewInstanceOverload("parseURL_string",
-					[]*exprpb.Type{decls.String}, mapStrDyn)),
-			decls.NewFunction("compareSecret",
-				decls.NewInstanceOverload("compareSecret_string_string",
-					[]*exprpb.Type{decls.String, decls.String, decls.String}, decls.Bool)),
-			decls.NewFunction("marshalJSON",
-				decls.NewInstanceOverload("marshalJSON_map",
-					[]*exprpb.Type{mapStrDyn}, decls.String)))}
+		cel.Function("match",
+			cel.MemberOverload("match_map_string_string", []*cel.Type{mapStrDyn, cel.StringType, cel.StringType}, cel.BoolType,
+				cel.FunctionBinding(matchHeader))),
+		cel.Function("canonical",
+			cel.MemberOverload("canonical_map_string", []*cel.Type{mapStrDyn, cel.StringType}, cel.StringType,
+				cel.BinaryBinding(canonicalHeader))),
+		cel.Function("truncate",
+			cel.MemberOverload("truncate_string_uint", []*cel.Type{cel.StringType, cel.IntType}, cel.StringType,
+				cel.BinaryBinding(truncateString))),
+		cel.Function("compareSecret",
+			cel.MemberOverload("compareSecret_string_string_string", []*cel.Type{cel.StringType, cel.StringType, cel.StringType, cel.StringType}, cel.BoolType,
+				cel.FunctionBinding(makeCompareSecret(t.ctx, t.defaultNS, t.secretGetter))),
+			cel.MemberOverload("compareSecret_string_string", []*cel.Type{cel.StringType, cel.StringType, cel.StringType}, cel.BoolType,
+				cel.FunctionBinding(makeCompareSecret(t.ctx, t.defaultNS, t.secretGetter)))),
+		cel.Function("parseJSON",
+			cel.MemberOverload("parseJSON_string", []*cel.Type{cel.StringType}, mapStrDyn,
+				cel.UnaryBinding(parseJSONString))),
+		cel.Function("parseYAML",
+			cel.MemberOverload("parseYAML_string", []*cel.Type{cel.StringType}, mapStrDyn,
+				cel.UnaryBinding(parseYAMLString))),
+		cel.Function("parseURL",
+			cel.MemberOverload("parseURL_string", []*cel.Type{cel.StringType}, mapStrDyn,
+				cel.UnaryBinding(parseURLString))),
+		cel.Function("marshalJSON",
+			cel.MemberOverload("marshalJSON_map", []*cel.Type{mapStrDyn}, cel.StringType,
+				cel.UnaryBinding(marshalJSON)),
+			cel.MemberOverload("marshalJSON_list", []*cel.Type{listStrDyn}, cel.StringType,
+				cel.UnaryBinding(marshalJSON))),
+		cel.Function("last",
+			cel.MemberOverload("last_list", []*cel.Type{listStrDyn}, cel.DynType,
+				cel.UnaryBinding(listLast))),
+		cel.Function("first",
+			cel.MemberOverload("first_list", []*cel.Type{listStrDyn}, cel.DynType,
+				cel.UnaryBinding(listFirst))),
+		cel.Function("translate",
+			cel.MemberOverload("translate_string_string", []*cel.Type{cel.StringType, cel.StringType, cel.StringType}, cel.StringType,
+				cel.FunctionBinding(translateString))),
+	}
 }
 
 func (t triggersLib) ProgramOptions() []cel.ProgramOption {
-	return []cel.ProgramOption{
-		cel.Functions(
-			&functions.Overload{
-				Operator: "match",
-				Function: matchHeader},
-			&functions.Overload{
-				Operator: "canonical",
-				Binary:   canonicalHeader},
-			&functions.Overload{
-				Operator: "truncate",
-				Binary:   truncateString},
-			&functions.Overload{
-				Operator: "decodeb64",
-				Unary:    decodeB64String},
-			&functions.Overload{
-				Operator: "parseJSON",
-				Unary:    parseJSONString},
-			&functions.Overload{
-				Operator: "parseYAML",
-				Unary:    parseYAMLString},
-			&functions.Overload{
-				Operator: "parseURL",
-				Unary:    parseURLString},
-			&functions.Overload{
-				Operator: "compareSecret",
-				Function: makeCompareSecret(t.defaultNS, t.client)},
-			&functions.Overload{
-				Operator: "marshalJSON",
-				Unary:    marshalJSON},
-		)}
+	return []cel.ProgramOption{}
 }
 
 func matchHeader(vals ...ref.Val) ref.Val {
@@ -244,31 +221,15 @@ func matchHeader(vals ...ref.Val) ref.Val {
 		return types.NewErr("failed to convert to http.Header: %w", err)
 	}
 
-	key, ok := vals[1].(types.String)
-	if !ok {
-		return types.ValOrErr(key, "unexpected type '%v' passed to match", vals[1].Type())
-	}
-
-	val, ok := vals[2].(types.String)
-	if !ok {
-		return types.ValOrErr(val, "unexpected type '%v' passed to match", vals[2].Type())
-	}
-
+	key := vals[1].(types.String)
+	val := vals[2].(types.String)
 	return types.Bool(h.(http.Header).Get(string(key)) == string(val))
 }
 
 func truncateString(lhs, rhs ref.Val) ref.Val {
-	str, ok := lhs.(types.String)
-	if !ok {
-		return types.ValOrErr(str, "unexpected type '%v' passed to truncate", lhs.Type())
-	}
-
-	n, ok := rhs.(types.Int)
-	if !ok {
-		return types.ValOrErr(n, "unexpected type '%v' passed to truncate", rhs.Type())
-	}
-
-	return types.String(str[:max(n, types.Int(len(str)))])
+	str := lhs.(types.String)
+	n := rhs.(types.Int)
+	return str[:max(n, types.Int(len(str)))]
 }
 
 func canonicalHeader(lhs, rhs ref.Val) ref.Val {
@@ -277,29 +238,13 @@ func canonicalHeader(lhs, rhs ref.Val) ref.Val {
 		return types.NewErr("failed to convert to http.Header: %w", err)
 	}
 
-	key, ok := rhs.(types.String)
-	if !ok {
-		return types.ValOrErr(key, "unexpected type '%v' passed to canonical", rhs.Type())
-	}
-
+	key := rhs.(types.String)
 	return types.String(h.(http.Header).Get(string(key)))
-}
-
-func decodeB64String(val ref.Val) ref.Val {
-	str, ok := val.(types.String)
-	if !ok {
-		return types.ValOrErr(str, "unexpected type '%v' passed to decodeB64", val.Type())
-	}
-	dec, err := base64.StdEncoding.DecodeString(str.Value().(string))
-	if err != nil {
-		return types.NewErr("failed to decode '%v' in decodeB64: %w", str, err)
-	}
-	return types.String(dec)
 }
 
 // makeCompareSecret creates and returns a functions.FunctionOp that wraps the
 // ns and client in a closure with a function that can compare the string.
-func makeCompareSecret(defaultNS string, k kubernetes.Interface) functions.FunctionOp {
+func makeCompareSecret(ctx context.Context, defaultNS string, sg interceptors.SecretGetter) functions.FunctionOp {
 	return func(vals ...ref.Val) ref.Val {
 		var ok bool
 		compareString, ok := vals[0].(types.String)
@@ -326,19 +271,16 @@ func makeCompareSecret(defaultNS string, k kubernetes.Interface) functions.Funct
 		// GetSecretToken uses request as a cache key to cache secret lookup. Since multiple
 		// triggers execute concurrently in separate goroutines, this cache is not very effective
 		// for this use case
-		secretToken, err := interceptors.GetSecretToken(nil, k, secretRef, string(secretNS))
+		secretToken, err := sg.Get(ctx, string(secretNS), secretRef)
 		if err != nil {
 			return types.NewErr("failed to find secret '%#v' in compareSecret: %w", *secretRef, err)
 		}
-		return types.Bool(subtle.ConstantTimeCompare([]byte(secretToken), []byte(compareString)) == 1)
+		return types.Bool(subtle.ConstantTimeCompare(secretToken, []byte(compareString)) == 1)
 	}
 }
 
 func parseJSONString(val ref.Val) ref.Val {
-	str, ok := val.(types.String)
-	if !ok {
-		return types.ValOrErr(str, "unexpected type '%v' passed to parseJSON", val.Type())
-	}
+	str := val.(types.String)
 	decodedVal := map[string]interface{}{}
 	err := json.Unmarshal([]byte(str), &decodedVal)
 	if err != nil {
@@ -348,14 +290,12 @@ func parseJSONString(val ref.Val) ref.Val {
 	if err != nil {
 		return types.NewErr("failed to create a new registry in parseJSON: %w", err)
 	}
+
 	return types.NewDynamicMap(r, decodedVal)
 }
 
 func parseYAMLString(val ref.Val) ref.Val {
-	str, ok := val.(types.String)
-	if !ok {
-		return types.ValOrErr(str, "unexpected type '%v' passed to parseYAML", val.Type())
-	}
+	str := val.(types.String)
 	decodedVal := map[string]interface{}{}
 	err := yaml.Unmarshal([]byte(str), &decodedVal)
 	if err != nil {
@@ -369,11 +309,7 @@ func parseYAMLString(val ref.Val) ref.Val {
 }
 
 func parseURLString(val ref.Val) ref.Val {
-	str, ok := val.(types.String)
-	if !ok {
-		return types.ValOrErr(str, "unexpected type '%v' passed to parseURL", val.Type())
-	}
-
+	str := val.(types.String)
 	parsed, err := url.Parse(string(str))
 	if err != nil {
 		return types.NewErr("failed to decode '%v' in parseURL: %w", str, err)
@@ -408,6 +344,52 @@ func marshalJSON(val ref.Val) ref.Val {
 	}
 
 	return types.String(marshaledVal)
+}
+
+func listLast(val ref.Val) ref.Val {
+	l := val.(traits.Lister)
+	sz := l.Size().Value().(int64)
+
+	if sz == 0 {
+		return types.NullValue
+	}
+
+	return l.Get(types.Int(sz - 1))
+}
+
+func listFirst(val ref.Val) ref.Val {
+	l := val.(traits.Lister)
+	sz := l.Size().Value().(int64)
+
+	if sz == 0 {
+		return types.NullValue
+	}
+
+	return l.Get(types.Int(0))
+}
+
+func translateString(vals ...ref.Val) ref.Val {
+	regstr, ok := vals[1].(types.String)
+	if !ok {
+		return types.ValOrErr(regstr, "unexpected type '%v' used in translate", vals[1].Type())
+	}
+
+	src, ok := vals[0].(types.String)
+	if !ok {
+		return types.ValOrErr(src, "unexpected type '%v' used in translate", vals[0].Type())
+	}
+
+	repl, ok := vals[2].(types.String)
+	if !ok {
+		return types.ValOrErr(repl, "unexpected type '%v' used in translate", vals[2].Type())
+	}
+
+	re, err := regexp.Compile(string(regstr))
+	if err != nil {
+		return types.NewErr("failed to parse regular expression for translation: %w", err)
+	}
+
+	return types.String(re.ReplaceAllString(string(src), string(repl)))
 }
 
 func max(x, y types.Int) types.Int {

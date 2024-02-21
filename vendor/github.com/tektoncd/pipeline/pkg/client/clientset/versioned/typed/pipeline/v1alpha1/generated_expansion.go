@@ -18,16 +18,8 @@ limitations under the License.
 
 package v1alpha1
 
-type ClusterTaskExpansion interface{}
-
-type ConditionExpansion interface{}
-
-type PipelineExpansion interface{}
-
-type PipelineRunExpansion interface{}
-
 type RunExpansion interface{}
 
-type TaskExpansion interface{}
+type StepActionExpansion interface{}
 
-type TaskRunExpansion interface{}
+type VerificationPolicyExpansion interface{}

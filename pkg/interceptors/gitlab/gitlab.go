@@ -19,62 +19,40 @@ package gitlab
 import (
 	"context"
 	"crypto/subtle"
-	"fmt"
 
-	"google.golang.org/grpc/codes"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
+	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
 	"github.com/tektoncd/triggers/pkg/interceptors"
-
-	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
-
-	"go.uber.org/zap"
-	"k8s.io/client-go/kubernetes"
+	"google.golang.org/grpc/codes"
 )
 
-var _ triggersv1.InterceptorInterface = (*Interceptor)(nil)
+var _ triggersv1.InterceptorInterface = (*InterceptorImpl)(nil)
 
-type Interceptor struct {
-	KubeClientSet kubernetes.Interface
-	Logger        *zap.SugaredLogger
+type InterceptorImpl struct {
+	SecretGetter interceptors.SecretGetter
 }
 
-func NewInterceptor(k kubernetes.Interface, l *zap.SugaredLogger) *Interceptor {
-	return &Interceptor{
-		Logger:        l,
-		KubeClientSet: k,
+func NewInterceptor(sg interceptors.SecretGetter) *InterceptorImpl {
+	return &InterceptorImpl{
+		SecretGetter: sg,
 	}
 }
 
-func (w *Interceptor) Process(ctx context.Context, r *triggersv1.InterceptorRequest) *triggersv1.InterceptorResponse {
-	p := triggersv1.GitLabInterceptor{}
+// InterceptorParams provides a webhook to intercept and pre-process events
+type InterceptorParams struct {
+	SecretRef *triggersv1.SecretRef `json:"secretRef,omitempty"`
+	// +listType=atomic
+	EventTypes []string `json:"eventTypes,omitempty"`
+}
+
+func (w *InterceptorImpl) Process(ctx context.Context, r *triggersv1.InterceptorRequest) *triggersv1.InterceptorResponse {
+	p := InterceptorParams{}
 	if err := interceptors.UnmarshalParams(r.InterceptorParams, &p); err != nil {
 		return interceptors.Failf(codes.InvalidArgument, "failed to parse interceptor params: %v", err)
 	}
 
 	headers := interceptors.Canonical(r.Header)
-	if p.SecretRef != nil {
-		// Check the secret to see if it is empty
-		if p.SecretRef.SecretKey == "" {
-			return interceptors.Fail(codes.FailedPrecondition, "gitlab interceptor secretRef.secretKey is empty")
-		}
-		header := headers.Get("X-GitLab-Token")
-		if header == "" {
-			return interceptors.Fail(codes.InvalidArgument, "no X-GitLab-Token header set")
-		}
 
-		ns, _ := triggersv1.ParseTriggerID(r.Context.TriggerID)
-		secret, err := w.KubeClientSet.CoreV1().Secrets(ns).Get(ctx, p.SecretRef.SecretName, metav1.GetOptions{})
-		if err != nil {
-			return interceptors.Fail(codes.Internal, fmt.Sprintf("error getting secret: %v", err))
-		}
-		secretToken := secret.Data[p.SecretRef.SecretKey]
-
-		// Make sure to use a constant time comparison here.
-		if subtle.ConstantTimeCompare([]byte(header), secretToken) == 0 {
-			return interceptors.Fail(codes.InvalidArgument, "Invalid X-GitLab-Token")
-		}
-	}
+	// Check if the event type is in the allow-list
 	if p.EventTypes != nil {
 		actualEvent := headers.Get("X-GitLab-Event")
 		isAllowed := false
@@ -86,6 +64,33 @@ func (w *Interceptor) Process(ctx context.Context, r *triggersv1.InterceptorRequ
 		}
 		if !isAllowed {
 			return interceptors.Failf(codes.FailedPrecondition, "event type %s is not allowed", actualEvent)
+		}
+	}
+
+	// Next validate secrets
+	if p.SecretRef != nil {
+		// Check the secret to see if it is empty
+		if p.SecretRef.SecretKey == "" {
+			return interceptors.Fail(codes.FailedPrecondition, "gitlab interceptor secretRef.secretKey is empty")
+		}
+		header := headers.Get("X-GitLab-Token")
+		if header == "" {
+			return interceptors.Fail(codes.InvalidArgument, "no X-GitLab-Token header set")
+		}
+
+		if r.Context == nil {
+			return interceptors.Failf(codes.InvalidArgument, "no request context passed")
+		}
+
+		ns, _ := triggersv1.ParseTriggerID(r.Context.TriggerID)
+		secretToken, err := w.SecretGetter.Get(ctx, ns, p.SecretRef)
+		if err != nil {
+			return interceptors.Failf(codes.FailedPrecondition, "error getting secret: %v", err)
+		}
+
+		// Make sure to use a constant time comparison here.
+		if subtle.ConstantTimeCompare([]byte(header), secretToken) == 0 {
+			return interceptors.Fail(codes.InvalidArgument, "Invalid X-GitLab-Token")
 		}
 	}
 	return &triggersv1.InterceptorResponse{

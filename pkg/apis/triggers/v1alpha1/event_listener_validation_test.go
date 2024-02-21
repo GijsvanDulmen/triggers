@@ -18,10 +18,12 @@ package v1alpha1_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
-	pipelinev1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1alpha1"
-	"github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
+	pipelinev1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
+	pipelinev1beta1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
+	"github.com/tektoncd/triggers/pkg/apis/triggers"
 	"github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
 	"github.com/tektoncd/triggers/test"
 	corev1 "k8s.io/api/core/v1"
@@ -36,7 +38,7 @@ import (
 func Test_EventListenerValidate_OnDelete(t *testing.T) {
 	el := &v1alpha1.EventListener{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "name",
+			Name:      strings.Repeat("foo", 64), // Length should be lower than 63
 			Namespace: "namespace",
 		},
 		Spec: v1alpha1.EventListenerSpec{
@@ -95,6 +97,20 @@ func Test_EventListenerValidate(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "name",
 				Namespace: "namespace",
+			},
+			Spec: v1alpha1.EventListenerSpec{
+				Triggers: []v1alpha1.EventListenerTrigger{{
+					TriggerRef: "tt",
+				}},
+			},
+		},
+	}, {
+		name: "Valid EventListener with Annotation",
+		el: &v1alpha1.EventListener{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "name",
+				Namespace:   "namespace",
+				Annotations: map[string]string{triggers.PayloadValidationAnnotation: "true"},
 			},
 			Spec: v1alpha1.EventListenerSpec{
 				Triggers: []v1alpha1.EventListenerTrigger{{
@@ -211,16 +227,16 @@ func Test_EventListenerValidate(t *testing.T) {
 				Triggers: []v1alpha1.EventListenerTrigger{{
 					Interceptors: []*v1alpha1.EventInterceptor{{
 						Webhook: &v1alpha1.WebhookInterceptor{
-							Header: []pipelinev1.Param{{
+							Header: []pipelinev1beta1.Param{{
 								Name: "Valid-Header-Key",
-								Value: pipelinev1.ArrayOrString{
-									Type:      pipelinev1.ParamTypeString,
+								Value: pipelinev1beta1.ParamValue{
+									Type:      pipelinev1beta1.ParamTypeString,
 									StringVal: "valid-value",
 								},
 							}, {
 								Name: "Valid-Header-Key2",
-								Value: pipelinev1.ArrayOrString{
-									Type:      pipelinev1.ParamTypeString,
+								Value: pipelinev1beta1.ParamValue{
+									Type:      pipelinev1beta1.ParamTypeString,
 									StringVal: "valid value 2",
 								},
 							}},
@@ -404,6 +420,11 @@ func Test_EventListenerValidate(t *testing.T) {
 				Namespace: "namespace",
 			},
 			Spec: v1alpha1.EventListenerSpec{
+				Triggers: []v1alpha1.EventListenerTrigger{{
+					Template: &v1alpha1.EventListenerTemplate{
+						Ref: ptr.String("tt"),
+					},
+				}},
 				Resources: v1alpha1.Resources{
 					KubernetesResource: &v1alpha1.KubernetesResource{
 						Replicas: ptr.Int32(1),
@@ -457,6 +478,37 @@ func Test_EventListenerValidate(t *testing.T) {
 			},
 		},
 	}, {
+		name: "Valid EventListener with probes",
+		el: &v1alpha1.EventListener{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "name",
+				Namespace: "namespace",
+			},
+			Spec: v1alpha1.EventListenerSpec{
+				Triggers: []v1alpha1.EventListenerTrigger{{
+					Template: &v1alpha1.EventListenerTemplate{
+						Ref: ptr.String("tt"),
+					},
+				}},
+				Resources: v1alpha1.Resources{
+					KubernetesResource: &v1alpha1.KubernetesResource{
+						WithPodSpec: duckv1.WithPodSpec{
+							Template: duckv1.PodSpecable{
+								Spec: corev1.PodSpec{
+									ServiceAccountName: "k8sresource",
+									Containers: []corev1.Container{{
+										ReadinessProbe: &corev1.Probe{
+											InitialDelaySeconds: int32(10),
+										},
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}, {
 		name: "Valid EventListener with custom resources",
 		el: &v1alpha1.EventListener{
 			ObjectMeta: metav1.ObjectMeta{
@@ -486,7 +538,7 @@ func Test_EventListenerValidate(t *testing.T) {
 					Bindings: []*v1alpha1.EventListenerBinding{{
 						Ref:        "tb",
 						Kind:       v1alpha1.NamespacedTriggerBindingKind,
-						APIVersion: "v1alpha1", // TODO: APIVersions seem wrong?
+						APIVersion: "v1alpha1",
 					}},
 					Template: &v1alpha1.EventListenerTemplate{
 						Spec: &v1alpha1.TriggerTemplateSpec{
@@ -498,7 +550,7 @@ func Test_EventListenerValidate(t *testing.T) {
 							ResourceTemplates: []v1alpha1.TriggerResourceTemplate{{
 								RawExtension: test.RawExtension(t, pipelinev1.PipelineRun{
 									TypeMeta: metav1.TypeMeta{
-										APIVersion: "tekton.dev/v1alpha1",
+										APIVersion: "tekton.dev/v1",
 										Kind:       "TaskRun",
 									},
 									ObjectMeta: metav1.ObjectMeta{
@@ -554,6 +606,20 @@ func TestEventListenerValidate_error(t *testing.T) {
 					Template: &v1alpha1.EventListenerTemplate{
 						Ref: ptr.String(""),
 					},
+				}},
+			},
+		},
+	}, {
+		name: "Invalid Annotation value",
+		el: &v1alpha1.EventListener{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "name",
+				Namespace:   "namespace",
+				Annotations: map[string]string{triggers.PayloadValidationAnnotation: "xyz"},
+			},
+			Spec: v1alpha1.EventListenerSpec{
+				Triggers: []v1alpha1.EventListenerTrigger{{
+					TriggerRef: "tt",
 				}},
 			},
 		},
@@ -761,10 +827,10 @@ func TestEventListenerValidate_error(t *testing.T) {
 					Template: &v1alpha1.EventListenerTemplate{Ref: ptr.String("tt")},
 					Interceptors: []*v1alpha1.EventInterceptor{{
 						Webhook: &v1alpha1.WebhookInterceptor{
-							Header: []v1beta1.Param{{
+							Header: []pipelinev1beta1.Param{{
 								Name: "non-canonical-header-key",
-								Value: v1beta1.ArrayOrString{
-									Type:      v1beta1.ParamTypeString,
+								Value: pipelinev1beta1.ParamValue{
+									Type:      pipelinev1beta1.ParamTypeString,
 									StringVal: "valid value",
 								},
 							}},
@@ -792,10 +858,10 @@ func TestEventListenerValidate_error(t *testing.T) {
 					Template: &v1alpha1.EventListenerTemplate{Ref: ptr.String("tt")},
 					Interceptors: []*v1alpha1.EventInterceptor{{
 						Webhook: &v1alpha1.WebhookInterceptor{
-							Header: []v1beta1.Param{{
+							Header: []pipelinev1beta1.Param{{
 								Name: "",
-								Value: v1beta1.ArrayOrString{
-									Type:      v1beta1.ParamTypeString,
+								Value: pipelinev1beta1.ParamValue{
+									Type:      pipelinev1beta1.ParamTypeString,
 									StringVal: "valid value",
 								},
 							}},
@@ -823,10 +889,10 @@ func TestEventListenerValidate_error(t *testing.T) {
 					Template: &v1alpha1.EventListenerTemplate{Ref: ptr.String("tt")},
 					Interceptors: []*v1alpha1.EventInterceptor{{
 						Webhook: &v1alpha1.WebhookInterceptor{
-							Header: []v1beta1.Param{{
+							Header: []pipelinev1beta1.Param{{
 								Name: "Valid-Header-Key",
-								Value: v1beta1.ArrayOrString{
-									Type:      v1beta1.ParamTypeString,
+								Value: pipelinev1beta1.ParamValue{
+									Type:      pipelinev1beta1.ParamTypeString,
 									StringVal: "",
 								},
 							}},
@@ -944,27 +1010,6 @@ func TestEventListenerValidate_error(t *testing.T) {
 					Name:     "1234567890123456789012345678901234567890123456789012345678901234",
 					Template: &v1alpha1.EventListenerTemplate{Ref: ptr.String(""), APIVersion: "v1alpha1"},
 				}},
-			},
-		},
-	}, {
-		name: "user specify invalid deprecated replicas",
-		el: &v1alpha1.EventListener{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "name",
-				Namespace: "namespace",
-			},
-			Spec: v1alpha1.EventListenerSpec{
-				Triggers: []v1alpha1.EventListenerTrigger{{
-					Template: &v1alpha1.EventListenerTemplate{
-						Ref: ptr.String("tt"),
-					},
-				}},
-				DeprecatedReplicas: ptr.Int32(-1),
-				Resources: v1alpha1.Resources{
-					KubernetesResource: &v1alpha1.KubernetesResource{
-						Replicas: ptr.Int32(-1),
-					},
-				},
 			},
 		},
 	}, {
@@ -1188,6 +1233,54 @@ func TestEventListenerValidate_error(t *testing.T) {
 				},
 			},
 		},
+	}, {
+		name: "custom resource with probe data",
+		el: &v1alpha1.EventListener{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "name",
+				Namespace: "namespace",
+			},
+			Spec: v1alpha1.EventListenerSpec{
+				Triggers: []v1alpha1.EventListenerTrigger{{
+					TriggerRef: "triggerref",
+				}},
+				Resources: v1alpha1.Resources{
+					CustomResource: &v1alpha1.CustomResource{
+						RawExtension: getRawDataWithPobes(t),
+					},
+				},
+			},
+		},
+	}, {
+		name: "empty spec for eventlistener",
+		el: &v1alpha1.EventListener{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "name",
+				Namespace: "namespace",
+			},
+		},
+	}, {
+		name: "invalid interceptor for eventlistener",
+		el: &v1alpha1.EventListener{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "name",
+				Namespace: "namespace",
+			},
+			Spec: v1alpha1.EventListenerSpec{
+				Triggers: []v1alpha1.EventListenerTrigger{{
+					Name: "test",
+					Interceptors: []*v1alpha1.EventInterceptor{{
+						Ref: v1alpha1.InterceptorRef{
+							Name:       "cel",
+							Kind:       v1alpha1.ClusterInterceptorKind,
+							APIVersion: "triggers.tekton.dev/v1alpha1",
+						},
+					},
+						nil,
+					},
+				}},
+			},
+		},
 	}}
 
 	for _, tc := range tests {
@@ -1252,6 +1345,31 @@ func getValidRawData(t *testing.T) runtime.RawExtension {
 							},
 						},
 					}},
+				}},
+			},
+		}},
+	})
+}
+
+func getRawDataWithPobes(t *testing.T) runtime.RawExtension {
+	return test.RawExtension(t, duckv1.WithPod{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Service",
+			APIVersion: "serving.knative.dev/v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "knativeservice",
+		},
+		Spec: duckv1.WithPodSpec{Template: duckv1.PodSpecable{
+			Spec: corev1.PodSpec{
+				ServiceAccountName: "tekton-triggers-example-sa",
+				Containers: []corev1.Container{{
+					ReadinessProbe: &corev1.Probe{
+						FailureThreshold: int32(10),
+					},
+					LivenessProbe: &corev1.Probe{
+						FailureThreshold: int32(10),
+					},
 				}},
 			},
 		}},

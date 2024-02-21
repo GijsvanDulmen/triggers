@@ -19,7 +19,7 @@ package dynamic
 import (
 	"context"
 
-	"github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
+	"github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/cache"
 	"knative.dev/pkg/apis/duck"
@@ -52,9 +52,9 @@ func (t *listableTracker) watchOnDynamicObject(ctx context.Context, gvr schema.G
 	if err != nil {
 		return err
 	}
-	shInformer.AddEventHandler(cache.FilteringResourceEventHandler{
-		FilterFunc: controller.FilterControllerGVK(v1alpha1.SchemeGroupVersion.WithKind("EventListener")),
+	_, err = shInformer.AddEventHandler(cache.FilteringResourceEventHandler{
+		FilterFunc: controller.FilterController(&v1beta1.EventListener{}),
 		Handler:    controller.HandleAll(t.impl.EnqueueControllerOf),
 	})
-	return nil
+	return err
 }

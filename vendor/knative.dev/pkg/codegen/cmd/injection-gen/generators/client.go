@@ -22,13 +22,14 @@ import (
 	"k8s.io/gengo/generator"
 	"k8s.io/gengo/namer"
 	"k8s.io/gengo/types"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // clientGenerator produces a file of listers for a given GroupVersion and
 // type.
 type clientGenerator struct {
 	generator.DefaultGen
+
 	outputPackage    string
 	imports          namer.ImportTracker
 	clientSetPackage string
@@ -88,7 +89,7 @@ func (g *clientGenerator) GenerateType(c *generator.Context, t *types.Type, w io
 
 var injectionClient = `
 func init() {
-	{{.injectionRegisterClient|raw}}(withClient)
+	{{.injectionRegisterClient|raw}}(withClientFromConfig)
 	{{.injectionRegisterClientFetcher|raw}}(func(ctx context.Context) interface{} {
 		return Get(ctx)
 	})
@@ -97,7 +98,7 @@ func init() {
 // Key is used as the key for associating information with a context.Context.
 type Key struct{}
 
-func withClient(ctx {{.contextContext|raw}}, cfg *{{.restConfig|raw}}) context.Context {
+func withClientFromConfig(ctx {{.contextContext|raw}}, cfg *{{.restConfig|raw}}) context.Context {
 	return context.WithValue(ctx, Key{}, {{.clientSetNewForConfigOrDie|raw}}(cfg))
 }
 

@@ -21,15 +21,12 @@ import (
 	"net/http"
 	"testing"
 
-	"go.uber.org/zap/zaptest"
-
+	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
+	"github.com/tektoncd/triggers/pkg/interceptors"
 	"github.com/tektoncd/triggers/test"
-
-	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	fakekubeclient "knative.dev/pkg/client/injection/kube/client/fake"
-	rtesting "knative.dev/pkg/reconciler/testing"
 )
 
 func TestInterceptor_Process_ShouldContinue(t *testing.T) {
@@ -37,23 +34,23 @@ func TestInterceptor_Process_ShouldContinue(t *testing.T) {
 		emptyJSONBody = json.RawMessage(`{}`)
 		secretToken   = "secret"
 	)
-	emptyBodyHMACSignature := test.HMACHeader(t, secretToken, emptyJSONBody)
+	emptyBodyHMACSignature := test.HMACHeader(t, secretToken, emptyJSONBody, "sha1")
 
 	tests := []struct {
 		name              string
-		interceptorParams *triggersv1.BitbucketInterceptor
+		interceptorParams *InterceptorParams
 		payload           []byte
 		secret            *corev1.Secret
 		signature         string
 		eventType         string
 	}{{
 		name:              "no secret",
-		interceptorParams: &triggersv1.BitbucketInterceptor{},
+		interceptorParams: &InterceptorParams{},
 		payload:           emptyJSONBody,
 		signature:         "foo",
 	}, {
 		name: "valid header for secret",
-		interceptorParams: &triggersv1.BitbucketInterceptor{
+		interceptorParams: &InterceptorParams{
 			SecretRef: &triggersv1.SecretRef{
 				SecretName: "mysecret",
 				SecretKey:  "token",
@@ -71,14 +68,14 @@ func TestInterceptor_Process_ShouldContinue(t *testing.T) {
 		payload: emptyJSONBody,
 	}, {
 		name: "matching event",
-		interceptorParams: &triggersv1.BitbucketInterceptor{
+		interceptorParams: &InterceptorParams{
 			EventTypes: []string{"pr:opened", "repo:refs_changed"},
 		},
 		payload:   emptyJSONBody,
 		eventType: "repo:refs_changed",
 	}, {
 		name: "valid header for secret and matching event",
-		interceptorParams: &triggersv1.BitbucketInterceptor{
+		interceptorParams: &InterceptorParams{
 			SecretRef: &triggersv1.SecretRef{
 				SecretName: "mysecret",
 				SecretKey:  "token",
@@ -98,19 +95,20 @@ func TestInterceptor_Process_ShouldContinue(t *testing.T) {
 		payload:   emptyJSONBody,
 	}, {
 		name:              "nil body does not panic",
-		interceptorParams: &triggersv1.BitbucketInterceptor{},
+		interceptorParams: &InterceptorParams{},
 		payload:           nil,
 		signature:         "foo",
 	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, _ := rtesting.SetupFakeContext(t)
-			logger := zaptest.NewLogger(t)
-			kubeClient := fakekubeclient.Get(ctx)
-
-			w := &Interceptor{
-				KubeClientSet: kubeClient,
-				Logger:        logger.Sugar(),
+			ctx, _ := test.SetupFakeContext(t)
+			clientset := fakekubeclient.Get(ctx)
+			if tt.secret != nil {
+				tt.secret.Namespace = metav1.NamespaceDefault
+				ctx, clientset = fakekubeclient.With(ctx, tt.secret)
+			}
+			w := &InterceptorImpl{
+				SecretGetter: interceptors.DefaultSecretGetter(clientset.CoreV1()),
 			}
 
 			req := &triggersv1.InterceptorRequest{
@@ -135,11 +133,6 @@ func TestInterceptor_Process_ShouldContinue(t *testing.T) {
 			if tt.signature != "" {
 				req.Header["X-Hub-Signature"] = []string{tt.signature}
 			}
-			if tt.secret != nil {
-				if _, err := kubeClient.CoreV1().Secrets(metav1.NamespaceDefault).Create(ctx, tt.secret, metav1.CreateOptions{}); err != nil {
-					t.Error(err)
-				}
-			}
 			res := w.Process(ctx, req)
 			if !res.Continue {
 				t.Fatalf("Interceptor.Process() expected res.Continue to be true but got %t. \nStatus.Err(): %v", res.Continue, res.Status.Err())
@@ -153,18 +146,18 @@ func TestInterceptor_Process_ShouldNotContinue(t *testing.T) {
 		emptyJSONBody = json.RawMessage(`{}`)
 		secretToken   = "secret"
 	)
-	emptyBodyHMACSignature := test.HMACHeader(t, secretToken, emptyJSONBody)
+	emptyBodyHMACSignature := test.HMACHeader(t, secretToken, emptyJSONBody, "sha1")
 
 	tests := []struct {
 		name              string
-		interceptorParams *triggersv1.BitbucketInterceptor
+		interceptorParams *InterceptorParams
 		payload           []byte
 		secret            *corev1.Secret
 		signature         string
 		eventType         string
 	}{{
 		name: "invalid header for secret",
-		interceptorParams: &triggersv1.BitbucketInterceptor{
+		interceptorParams: &InterceptorParams{
 			SecretRef: &triggersv1.SecretRef{
 				SecretName: "mysecret",
 				SecretKey:  "token",
@@ -182,7 +175,7 @@ func TestInterceptor_Process_ShouldNotContinue(t *testing.T) {
 		payload: emptyJSONBody,
 	}, {
 		name: "no X-Hub-Signature header for secret",
-		interceptorParams: &triggersv1.BitbucketInterceptor{
+		interceptorParams: &InterceptorParams{
 			SecretRef: &triggersv1.SecretRef{
 				SecretName: "mysecret",
 				SecretKey:  "token",
@@ -199,14 +192,14 @@ func TestInterceptor_Process_ShouldNotContinue(t *testing.T) {
 		payload: emptyJSONBody,
 	}, {
 		name: "no matching event",
-		interceptorParams: &triggersv1.BitbucketInterceptor{
+		interceptorParams: &InterceptorParams{
 			EventTypes: []string{"pr:opened", "repo:refs_changed"},
 		},
 		payload:   emptyJSONBody,
 		eventType: "event",
 	}, {
 		name: "invalid header for secret, but matching event",
-		interceptorParams: &triggersv1.BitbucketInterceptor{
+		interceptorParams: &InterceptorParams{
 			SecretRef: &triggersv1.SecretRef{
 				SecretName: "mysecret",
 				SecretKey:  "token",
@@ -226,7 +219,7 @@ func TestInterceptor_Process_ShouldNotContinue(t *testing.T) {
 		payload:   emptyJSONBody,
 	}, {
 		name: "valid header for secret, but no matching event",
-		interceptorParams: &triggersv1.BitbucketInterceptor{
+		interceptorParams: &InterceptorParams{
 			SecretRef: &triggersv1.SecretRef{
 				SecretName: "mysecret",
 				SecretKey:  "token",
@@ -246,7 +239,7 @@ func TestInterceptor_Process_ShouldNotContinue(t *testing.T) {
 		payload:   emptyJSONBody,
 	}, {
 		name: "empty secret",
-		interceptorParams: &triggersv1.BitbucketInterceptor{
+		interceptorParams: &InterceptorParams{
 			SecretRef: &triggersv1.SecretRef{
 				SecretName: "mysecret",
 			},
@@ -264,13 +257,14 @@ func TestInterceptor_Process_ShouldNotContinue(t *testing.T) {
 	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, _ := rtesting.SetupFakeContext(t)
-			logger := zaptest.NewLogger(t)
-			kubeClient := fakekubeclient.Get(ctx)
-
-			w := &Interceptor{
-				KubeClientSet: kubeClient,
-				Logger:        logger.Sugar(),
+			ctx, _ := test.SetupFakeContext(t)
+			clientset := fakekubeclient.Get(ctx)
+			if tt.secret != nil {
+				tt.secret.Namespace = metav1.NamespaceDefault
+				ctx, clientset = fakekubeclient.With(ctx, tt.secret)
+			}
+			w := &InterceptorImpl{
+				SecretGetter: interceptors.DefaultSecretGetter(clientset.CoreV1()),
 			}
 
 			req := &triggersv1.InterceptorRequest{
@@ -295,11 +289,6 @@ func TestInterceptor_Process_ShouldNotContinue(t *testing.T) {
 			if tt.signature != "" {
 				req.Header["X-Hub-Signature"] = []string{tt.signature}
 			}
-			if tt.secret != nil {
-				if _, err := kubeClient.CoreV1().Secrets(metav1.NamespaceDefault).Create(ctx, tt.secret, metav1.CreateOptions{}); err != nil {
-					t.Error(err)
-				}
-			}
 			res := w.Process(ctx, req)
 			if res.Continue {
 				t.Fatalf("Interceptor.Process() expected res.Continue to be false but got %t. \nStatus.Err(): %v", res.Continue, res.Status.Err())
@@ -309,13 +298,10 @@ func TestInterceptor_Process_ShouldNotContinue(t *testing.T) {
 }
 
 func TestInterceptor_Process_InvalidParams(t *testing.T) {
-	ctx, _ := rtesting.SetupFakeContext(t)
-	logger := zaptest.NewLogger(t)
-	kubeClient := fakekubeclient.Get(ctx)
+	ctx, _ := test.SetupFakeContext(t)
 
-	w := &Interceptor{
-		KubeClientSet: kubeClient,
-		Logger:        logger.Sugar(),
+	w := &InterceptorImpl{
+		SecretGetter: interceptors.DefaultSecretGetter(fakekubeclient.Get(ctx).CoreV1()),
 	}
 
 	req := &triggersv1.InterceptorRequest{

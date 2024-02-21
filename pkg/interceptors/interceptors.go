@@ -21,16 +21,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
-	"path"
 
+	triggersv1alpha1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
+	triggersv1beta1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
 	"google.golang.org/grpc/codes"
 	"knative.dev/pkg/apis"
-
-	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 )
 
 const (
@@ -42,51 +39,8 @@ type Interceptor interface {
 	ExecuteTrigger(req *http.Request) (*http.Response, error)
 }
 
-type key string
-
-const RequestCacheKey key = "interceptors.RequestCache"
-
-func getCache(req *http.Request) map[string]interface{} {
-	if cache, ok := req.Context().Value(RequestCacheKey).(map[string]interface{}); ok {
-		return cache
-	}
-
-	return make(map[string]interface{})
-}
-
-// GetSecretToken queries Kubernetes for the given secret reference. We use this function
-// to resolve secret material like GitHub webhook secrets, and call it once for every
-// trigger that references it.
-//
-// As we may have many triggers that all use the same secret, we cache the secret values
-// in the request cache.
-// TODO: we don't really use the cache here. Instead use a secretLister?
-func GetSecretToken(req *http.Request, cs kubernetes.Interface, sr *triggersv1.SecretRef, triggerNS string) ([]byte, error) {
-	var cache map[string]interface{}
-
-	cacheKey := path.Join("secret", triggerNS, sr.SecretName, sr.SecretKey)
-	if req != nil {
-		cache = getCache(req)
-		if secretValue, ok := cache[cacheKey]; ok {
-			return secretValue.([]byte), nil
-		}
-	}
-
-	secret, err := cs.CoreV1().Secrets(triggerNS).Get(context.Background(), sr.SecretName, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-
-	secretValue := secret.Data[sr.SecretKey]
-	if req != nil {
-		cache[cacheKey] = secret.Data[sr.SecretKey]
-	}
-
-	return secretValue, nil
-}
-
 // GetInterceptorParams returns InterceptorParams for the current interceptors
-func GetInterceptorParams(i *triggersv1.EventInterceptor) map[string]interface{} {
+func GetInterceptorParams(i *triggersv1beta1.EventInterceptor) map[string]interface{} {
 	ip := map[string]interface{}{}
 	switch {
 	case i.Webhook != nil:
@@ -95,35 +49,6 @@ func GetInterceptorParams(i *triggersv1.EventInterceptor) map[string]interface{}
 		if i.Webhook != nil {
 			ip["objectRef"] = i.Webhook.ObjectRef
 			ip["header"] = i.Webhook.Header
-		}
-	case i.DeprecatedGitHub != nil:
-		if i.DeprecatedGitHub.EventTypes != nil {
-			ip["eventTypes"] = i.DeprecatedGitHub.EventTypes
-		}
-		if i.DeprecatedGitHub.SecretRef != nil {
-			ip["secretRef"] = i.DeprecatedGitHub.SecretRef
-		}
-	case i.DeprecatedGitLab != nil:
-		if i.DeprecatedGitLab.EventTypes != nil {
-			ip["eventTypes"] = i.DeprecatedGitLab.EventTypes
-		}
-		if i.DeprecatedGitLab.SecretRef != nil {
-			ip["secretRef"] = i.DeprecatedGitLab.SecretRef
-		}
-	case i.DeprecatedCEL != nil:
-		if i.DeprecatedCEL.Filter != "" {
-			ip["filter"] = i.DeprecatedCEL.Filter
-		}
-
-		if i.DeprecatedCEL.Overlays != nil {
-			ip["overlays"] = i.DeprecatedCEL.Overlays
-		}
-	case i.DeprecatedBitbucket != nil:
-		if i.DeprecatedBitbucket.EventTypes != nil {
-			ip["eventTypes"] = i.DeprecatedBitbucket.EventTypes
-		}
-		if i.DeprecatedBitbucket.SecretRef != nil {
-			ip["secretRef"] = i.DeprecatedBitbucket.SecretRef
 		}
 	case i.Params != nil:
 		for _, p := range i.Params {
@@ -134,10 +59,10 @@ func GetInterceptorParams(i *triggersv1.EventInterceptor) map[string]interface{}
 }
 
 // Fail constructs a InterceptorResponse that should not continue further processing.
-func Fail(c codes.Code, msg string) *triggersv1.InterceptorResponse {
-	return &triggersv1.InterceptorResponse{
+func Fail(c codes.Code, msg string) *triggersv1beta1.InterceptorResponse {
+	return &triggersv1beta1.InterceptorResponse{
 		Continue: false,
-		Status: triggersv1.Status{
+		Status: triggersv1beta1.Status{
 			Code:    c,
 			Message: msg,
 		},
@@ -145,7 +70,7 @@ func Fail(c codes.Code, msg string) *triggersv1.InterceptorResponse {
 }
 
 // Failf constructs a InterceptorResponse that should not continue further processing.
-func Failf(c codes.Code, format string, a ...interface{}) *triggersv1.InterceptorResponse {
+func Failf(c codes.Code, format string, a ...interface{}) *triggersv1beta1.InterceptorResponse {
 	return Fail(c, fmt.Sprintf(format, a...))
 }
 
@@ -172,7 +97,7 @@ func UnmarshalParams(ip map[string]interface{}, p interface{}) error {
 	return nil
 }
 
-type InterceptorGetter func(name string) (*triggersv1.ClusterInterceptor, error)
+type InterceptorGetter func(name string) (*triggersv1alpha1.ClusterInterceptor, error)
 
 // ResolveToURL finds an Interceptor's URL.
 func ResolveToURL(getter InterceptorGetter, name string) (*apis.URL, error) {
@@ -189,7 +114,7 @@ func ResolveToURL(getter InterceptorGetter, name string) (*apis.URL, error) {
 	return ic.ResolveAddress()
 }
 
-func Execute(ctx context.Context, client *http.Client, req *triggersv1.InterceptorRequest, url string) (*triggersv1.InterceptorResponse, error) {
+func Execute(ctx context.Context, client *http.Client, req *triggersv1beta1.InterceptorRequest, url string) (*triggersv1beta1.InterceptorResponse, error) {
 	b, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -203,7 +128,7 @@ func Execute(ctx context.Context, client *http.Client, req *triggersv1.Intercept
 	if err != nil {
 		return nil, err
 	}
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	defer res.Body.Close()
 	if err != nil {
 		return nil, err
@@ -212,7 +137,7 @@ func Execute(ctx context.Context, client *http.Client, req *triggersv1.Intercept
 		// TODO: error type for easier checking. wrap in status.Errorf?
 		return nil, fmt.Errorf("interceptor response was not 200: %v", string(body))
 	}
-	iresp := triggersv1.InterceptorResponse{}
+	iresp := triggersv1beta1.InterceptorResponse{}
 	if err := json.Unmarshal(body, &iresp); err != nil {
 		return nil, err
 	}

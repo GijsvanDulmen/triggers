@@ -14,7 +14,7 @@ You can gather `EventListener` logs using the Tekton `tkn` CLI tool or the Kuber
 Use the following `tkn` command to gather `EventListener` logs:
 
 ```shell
-$ tkn eventlistener logs
+$ tkn eventlistener logs <eventlistener-name>
 ```
 See the `tkn` CLI tool [documentation page](https://github.com/tektoncd/cli/blob/main/docs/cmd/tkn_eventlistener_logs.md) for this config for more information.
 
@@ -34,11 +34,11 @@ test-event-listener   http://el-test-event-listener.default.svc.cluster.local:80
 
 ## Configuring debug logging for `EventListeners`
 
-By default, Tekton Triggers creates a Kubernetes [`ConfigMap`](https://kubernetes.io/docs/concepts/configuration/configmap/) named `config-logging-triggers`
-in the namespace of the target `EventListener`. To view this `ConfigMap`, use the following command: 
+`EventListeners` uses [`ConfigMap`](https://kubernetes.io/docs/concepts/configuration/configmap/) named `config-logging-triggers`
+in the namespace(typically tekton-pipelines) of the target Tekton Triggers controller. To view this `ConfigMap`, use the following command: 
 
 ```shell
-$ kubectl get cm -n <namespace>
+$ kubectl get cm -n tekton-pipelines
 NAME                      DATA   AGE
 config-logging-triggers   2      28m
 ```
@@ -62,13 +62,19 @@ data:
 To enable debug-level logging in Tekton Triggers, use the following command:
 
 ```shell
-$ kubectl patch cm config-logging-triggers -n <namespace> -p '{"data": {"loglevel.eventlistener": "debug"}}'
+$ kubectl patch cm config-logging-triggers -n tekton-pipelines  -p '{"data": {"zap-logger-config": "{\n  \"level\": \"debug\",\n  \"development\": false,\n  \"sampling\": {\n    \"initial\": 100,\n    \"thereafter\": 100\n  },\n  \"outputPaths\": [\"stdout\"],\n  \"errorOutputPaths\": [\"stderr\"],\n  \"encoding\": \"json\",\n  \"encoderConfig\": {\n    \"timeKey\": \"ts\",\n    \"levelKey\": \"level\",\n    \"nameKey\": \"logger\",\n    \"callerKey\": \"caller\",\n    \"messageKey\": \"msg\",\n    \"stacktraceKey\": \"stacktrace\",\n    \"lineEnding\": \"\",\n    \"levelEncoder\": \"\",\n    \"timeEncoder\": \"iso8601\",\n    \"durationEncoder\": \"\",\n    \"callerEncoder\": \"\"\n  }\n}\n"}}'
 ```
 
-The `EventListener` responds with a confirmation of the new logging level. For example:
+You need to delete deployment of EventListener so that above configuration are applied to Environment variables of Deployment.
+```shell
+$ kubectl delete deployment/el-{EventListenerName}
+```
+
+The `EventListener` will start with the new logging level. For example:
 
 ```json
-{"level":"info","ts":"2021-02-10T08:42:10.950Z","logger":"eventlistener","caller":"logging/config.go:207","msg":"Updating logging level for eventlistener from debug to info.","knative.dev/controller":"eventlistener","logging.googleapis.com/labels":{},"logging.googleapis.com/sourceLocation":{"file":"knative.dev/pkg@v0.0.0-20210107022335-51c72e24c179/logging/config.go","line":"207","function":"knative.dev/pkg/logging.UpdateLevelFromConfigMap.func1"}}
+{"level":"info","ts":"2022-07-26T16:02:26.191Z","caller":"logging/config.go:116","msg":"Successfully created the logger."}
+{"level":"info","ts":"2022-07-26T16:02:26.191Z","caller":"logging/config.go:117","msg":"Logging level set to: debug"}
 ```
 
 From this point on, every HTTP request that the `EventListener` logs contains additional information. For example: 
@@ -92,7 +98,7 @@ This returns the logging level to `info`.
 You may see the following message in your logs:
 
 ```json
-A{"level":"error","ts":"2021-02-10T08:43:47.409Z","logger":"eventlistener","caller":"sink/sink.go:230","msg":"failed to ApplyEventValuesToParams: failed to replace JSONPath value for param message: $(body.message): message is not found","knative.dev/controller":"eventlistener","/triggers-eventid":"c8f88","/trigger":"demo-trigger","logging.googleapis.com/labels":{},"logging.googleapis.com/sourceLocation":{"file":"github.com/tektoncd/triggers/pkg/sink/sink.go","line":"230","function":"github.com/tektoncd/triggers/pkg/sink.Sink.processTrigger"},"stacktrace":"github.com/tektoncd/triggers/pkg/sink.Sink.processTrigger\n\tgithub.com/tektoncd/triggers/pkg/sink/sink.go:230\ngithub.com/tektoncd/triggers/pkg/sink.Sink.HandleEvent.func1\n\tgithub.com/tektoncd/triggers/pkg/sink/sink.go:125"}
+{"level":"error","ts":"2021-02-10T08:43:47.409Z","logger":"eventlistener","caller":"sink/sink.go:230","msg":"failed to ApplyEventValuesToParams: failed to replace JSONPath value for param message: $(body.message): message is not found","knative.dev/controller":"eventlistener","/triggers-eventid":"c8f88","/trigger":"demo-trigger","logging.googleapis.com/labels":{},"logging.googleapis.com/sourceLocation":{"file":"github.com/tektoncd/triggers/pkg/sink/sink.go","line":"230","function":"github.com/tektoncd/triggers/pkg/sink.Sink.processTrigger"},"stacktrace":"github.com/tektoncd/triggers/pkg/sink.Sink.processTrigger\n\tgithub.com/tektoncd/triggers/pkg/sink/sink.go:230\ngithub.com/tektoncd/triggers/pkg/sink.Sink.HandleEvent.func1\n\tgithub.com/tektoncd/triggers/pkg/sink/sink.go:125"}
 ```
 
 This means that the selected `Interceptor` is unable to parse the structure of the received JSON payload. To troubleshoot this, you must capture and inspect the payload for inconsistencies.

@@ -21,7 +21,8 @@ extensions to the CEL specification for manipulating strings.
 For example:
 
 ```javascript
-'refs/heads/master'.split('/') // result = list ['refs', 'heads', 'master']
+'refs/heads/main'.split('/') // result = list ['refs', 'heads', 'main']
+['refs', 'heads', 'main'].join('/') // result = string 'refs/heads/main'
 'my place'.replace('my ',' ') // result = string 'place'
 'this that another'.replace('th ',' ', 2) // result = 'is at another'
 ```
@@ -44,7 +45,7 @@ For example:
 }
 ```
 
-In the JSON above, both numbers are parsed as CEL double (Go float64) values.
+In the JSON above, both numbers are parsed as CEL double (Go `float64`) values.
 
 This means that if you want to do integer arithmetic, you'll need to
 [use explicit conversion functions](https://github.com/google/cel-spec/blob/master/doc/langdef.md#numeric-values).
@@ -94,6 +95,57 @@ interceptors:
 `failed to evaluate overlay expression 'body.measure * 3': no such overload`
 because there's no automatic conversion.
 
+## CEL expression examples
+
+### Matching on an element in an array.
+
+CEL provides several [macros](https://github.com/google/cel-spec/blob/master/doc/langdef.md#macros) which can operate on JSON objects.
+
+If you have a JSON body like this:
+
+```json
+{
+  "labels": [
+    {
+      "name": "test-a"
+    },
+    {
+      "name":"test-b"
+    }
+  ]
+}
+```
+
+You can use this in filters in the following ways:
+
+ * `filter: body.labels.exists(x, x.name == 'test-b')` is _true_
+ * `filter: body.labels.exists(x, x.name == 'test-c')` is _false_
+ * `filter: body.labels.exists_one(x, x.name.endsWith('-b'))` is _true_
+ * `filter: body.labels.exists_one(x, x.name.startsWith('test-'))` is _false_
+ * `filter: body.labels.all(x, x.name.startsWith('test-'))` is _true_
+ * `filter: body.labels.all(x, x.name.endsWith('-b'))` is _false_
+
+You can also parse additional data from each of the labels:
+```yaml
+overlays:
+- key: suffixes
+  expression: "body.labels.map(x, x.name.substring(x.name.lastIndexOf('-')+1))"
+```
+This yields an array of `["a", "b"]` in the `suffixes` extension key.
+```yaml
+overlays:
+- key: filtered
+  expression: "body.labels.filter(x, x.name.endsWith('-b'))"
+```
+This would add an extensions key `filtered` with only one of the labels.
+```yaml
+[
+  {
+    "name": "test-b"
+  }
+]
+```
+
 ## cel-go extensions
 
 All the functionality from the cel-go project's [CEL extension](https://github.com/google/cel-go/tree/master/ext) is available in
@@ -112,9 +164,9 @@ base64.decode(body.b64value) == bytes('hello') # convert to bytes.
 
 ### Returning Bytes
 
-Confusingly, if you decode a base64 string with the cel-go base64 decoder, it will
-appear in the extension as a base64 encoded string, you will need to explicitly
-convert it to a CEL string.
+If you decode a base64 string with the cel-go base64 decoder, the result will
+be a set of base64 decoded bytes. To ensure the result is encoded as a string
+you will need to explicitly convert it to a CEL string.
 
 ```yaml
 interceptors:
@@ -250,13 +302,27 @@ interceptor.
       split
     </th>
     <td>
-      <pre>&lt;string&gt;.split(string) -> string(dyn)</pre>
+      <pre>&lt;string&gt;.split(string) -> list(string)</pre>
     </td>
     <td>
       Splits a string on the provided separator value.
     </td>
     <td>
      <pre>body.ref.split('/')</pre>
+    </td>
+  </tr>
+  <tr>
+    <th>
+      join
+    </th>
+    <td>
+      <pre>&lt;list(string)&gt;.join(string) -> string</pre>
+    </td>
+    <td>
+      Joins a list of strings on the provided separator value.
+    </td>
+    <td>
+     <pre>['body', 'refs', 'main'].join('/')</pre>
     </td>
   </tr>
   <tr>
@@ -283,6 +349,7 @@ interceptor.
     <td>
       Constant-time comparison of strings against secrets, this will fetch the secret using the combination of namespace/name and compare the token key to the string using a cryptographic constant-time comparison..<p>
       The event-listener service account must have access to the secret.
+      The parameters to the function are 1. the key within the secret, 2. the secret name, and 3. the namespace for the secret (optional, defaults to the namespace of the EventListener).
     </td>
     <td>
      <pre>header.canonical('X-Secret-Token').compareSecret('', 'secret-name', 'namespace')</pre>
@@ -375,4 +442,75 @@ which can be accessed by indexing.
      <pre>{"testing":"value"}.marshalJSON() == "{\"testing\": \"value\"}"</pre>
     </td>
   </tr>
+  <tr>
+    <th>
+     first()
+    </th>
+    <td>
+     <pre>&lt;jsonArray&gt;.first() -> &lt;jsonObject&gt;</pre>
+    </td>
+    <td>
+     Returns the first element in the array.
+    </td>
+    <td>
+     <pre>[1, 2, 3, 4, 5].first() == 1</pre>
+    </td>
+  </tr>
+  <tr>
+    <th>
+     last()
+    </th>
+    <td>
+     <pre>&lt;jsonArray&gt;.last() -> &lt;jsonObject&gt;</pre>
+    </td>
+    <td>
+     Returns the last element in the array.
+    </td>
+    <td>
+     <pre>[1, 2, 3, 4, 5].last() == 5</pre>
+    </td>
+  </tr>
+  <tr>
+    <th>
+     translate()
+    </th>
+    <td>
+     <pre>&lt;string&gt;.translate(string, string) -> &lt;string&gt;</pre>
+    </td>
+    <td>
+     Uses a regular expression to replace characters from the source string with characters from the replacements.
+    </td>
+    <td>
+     <pre>"This is $an Invalid5String ".translate("[^a-z0-9]+", "") == "hisisannvalid5tring"</pre><br />
+     <pre>"This is $an Invalid5String ".translate("[^a-z0-9]+", "ABC") == "ABChisABCisABCanABCnvalid5ABCtring"</pre>
+    </td>
+  </tr>
 </table>
+
+## Troubleshooting CEL expressions
+
+You can use the `cel-eval` tool to evaluate your CEL expressions against a specific HTTP request.
+
+To install the `cel-eval` tool use the following command:
+
+```sh
+$ go install github.com/tektoncd/triggers/cmd/cel-eval@latest
+```
+
+Below is an example of using the tool to evaluate a CEL expression:
+
+```sh
+$ cat testdata/expression.txt
+body.test.nested == "value"
+
+$ cat testdata/http.txt
+POST /foo HTTP/1.1
+Content-Length: 29
+Content-Type: application/json
+X-Header: tacocat
+
+{"test": {"nested": "value"}}
+
+$ cel-eval -e testdata/expression.txt -r testdata/http.txt
+true
+```

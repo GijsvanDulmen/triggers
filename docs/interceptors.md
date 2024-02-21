@@ -12,6 +12,9 @@ weight: 5
 - [GitHub `Interceptors`](#github-interceptors)
 - [GitLab `Interceptors`](#gitlab-interceptors)
 - [Bitbucket `Interceptors`](#bitbucket-interceptors)
+  - [Bitbucket Server](#bitbucket-server)
+  - [Bitbucket Cloud](#bitbucket-cloud)
+- [slack `Interceptors`](#slack-interceptors)
 - [CEL `Interceptors`](#cel-interceptors)
 - [Implementing custom `Interceptors`](#implementing-custom-interceptors)
 
@@ -22,9 +25,9 @@ transformation, define and test trigger conditions, and implement other useful p
 the payload data to the `TriggerBinding`. You can also use an `Interceptor` to modify the behavior of the associated `Trigger`.
 
 Tekton Triggers currently supports two distinct `Interceptor` implementations:
-- Standalone `Interceptors`, which are instances of the [`ClusterInterceptor`](./clusterinterceptors.md) Custom Resource Definition (CRD). You specify these `Interceptors` by referencing them,
+- Standalone `Interceptors`, which are instances of the [`Interceptor`](./namespacedinterceptor) or the [`ClusterInterceptor`](./clusterinterceptors.md) Custom Resource Definition (CRD). You specify these `Interceptors` by referencing them,
   along with the desired parameters, within your  `EventListener`. You can use the `ClusterInterceptor` CRD to implement your own custom `Interceptors`.
-- Legacy `Interceptors`, which you define entirely as part of of the `EventListener` definition. This implementation will eventually be deprecated, so please consider
+- Legacy `Interceptors`, which you define entirely as part of the `EventListener` definition. This implementation will eventually be deprecated, so please consider
   transitioning to standalone `Interceptors` as soon as possible. See [TEP-0026](https://github.com/tektoncd/community/blob/main/teps/0026-interceptor-plugins.md) for more context on this change.
 
 Tekton Triggers ships with the following `Interceptors` to help you get started:
@@ -32,15 +35,17 @@ Tekton Triggers ships with the following `Interceptors` to help you get started:
 - [GitHub `Interceptors`](#github-interceptors)
 - [GitLab `Interceptors`](#gitlab-interceptors)
 - [Bitbucket `Interceptors`](#bitbucket-interceptors)
+  - [Bitbucket Server](#bitbucket-server)
+  - [Bitbucket Cloud](#bitbucket-cloud)
 - [CEL `Interceptors`](#cel-interceptors)
 
 ## Specifying an `Interceptor`
 
 To specify an `Interceptor` within your `EventListener`, create an `interceptors:` field with the following sub-fields:
 - `name` - (optional) a name that uniquely identifies this `Interceptor` definition
-- `ref` - a reference to a [`ClusterInterceptor`](#clusterinterceptors) object with the following fields:
+- `ref` - a reference to a [`ClusterInterceptor`](./clusterinterceptors.md) or [`Interceptor`](./namespacedinterceptors.md) object with the following fields:
   - `name` - the name of the referenced `ClusterInterceptor`
-  - `kind` - (optional) specifies that the referenced Kubernetes object is a `ClusterInterceptor` object
+  - `kind` - (optional) specifies that whether the referenced Kubernetes object is a `ClusterInterceptor` object or `NamespacedInterceptor`. Default value is `ClusterInterceptor`
   - `apiVersion` - (optional) specifies the target API version, for example `triggers.tekton.dev/v1alpha1`
   - `params` - `name`/`value` pairs that specify the parameters you want to pass to the `ClusterInterceptor`
 - `params` - (optional) `name`/`value` pairs that specify the desired parameters for the `Interceptor`;
@@ -181,7 +186,125 @@ For reference, below is an example legacy GitHub `Interceptor` definition:
  
 ```
 
-For more information, see our [example](../examples/github) of using this `Interceptor`.
+For more information, see our [example](../examples/v1beta1/github) of using this `Interceptor`.
+
+#### Adding Changed Files
+
+The GitHub `Interceptor` also has the ability to add a comma delimited list of all files that have changed (added, modified or deleted) for the `push` and `pull_request` events. The list of changed files are added to the `changed_files` property of the event payload in the top-level `extensions` field
+
+Below is an example GitHub `Interceptor` that enables the `addChangedFiles` feature and uses the CEL `Interceptor` to filter incoming events by the files changed
+
+```yaml
+ triggers:
+    - name: github-listener
+      interceptors:
+        - ref:
+            name: "github"
+            kind: ClusterInterceptor
+            apiVersion: triggers.tekton.dev
+          params:
+          - name: "secretRef"
+            value:
+              secretName: github-secret
+              secretKey: secretToken
+          - name: "eventTypes"
+            value: ["pull_request", "push"]
+          - name: "addChangedFiles"
+            value:
+              enabled: true
+        - ref:
+            name: cel
+          params:
+          - name: filter
+            # execute only when a file within the controllers directory has changed
+            value: extensions.changed_files.matches('controllers/')
+```
+
+##### Adding Changed Files - Private Repository
+
+The ability to add changed files can also work with private repositories by supplying a [GitHub personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token) in the `personalAccessToken` field. In the example below, the `personalAccessToken` uses the `github-pat` secret to get the GitHub personal access token used to make the API calls to get the list of changed files.
+
+```yaml
+ triggers:
+    - name: github-listener
+      interceptors:
+        - ref:
+            name: "github"
+            kind: ClusterInterceptor
+            apiVersion: triggers.tekton.dev
+          params:
+          - name: "secretRef"
+            value:
+              secretName: github-secret
+              secretKey: secretToken
+          - name: "eventTypes"
+            value: ["pull_request", "push"]
+          - name: "addChangedFiles"
+            value:
+              enabled: true
+              personalAccessToken:
+                secretName: github-pat
+                secretKey: token
+        - ref:
+            name: cel
+          params:
+          - name: filter
+            # execute only when a file within the controllers directory has changed
+            value: extensions.changed_files.matches('controllers/')
+```
+
+For more information around adding changed files, see the following examples
+
+- [github-add-changed-files-pr](../examples/v1beta1/github-add-changed-files-pr)
+- [github-add-changed-files-push-cel](../examples/v1beta1/github-add-changed-files-push-cel)
+
+#### Owners validation for pull requests
+
+The GitHub `Interceptor` supports the ability to halt processing on a pull request if the user is not listed in the [owners](https://www.kubernetes.dev/docs/guide/owners/) file or is not a repository/organization member/owner. This feature can be used to prevent unnecessary execution of a PipelineRun or TaskRun. The GitHub `Interceptor` also supports the ability to trigger a PipelineRun/TaskRun through a comment that contains `/ok-to-test` on a pull request by an owner. 
+
+This feature will also work against private GitHub repositories by supplying a [GitHub personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token) in the `personalAccessToken` field.
+
+> NOTE: Owners validation requires (at a minimum) the `pull_request` and `issue_comment` GitHub event types.
+
+To use the GitHub `Interceptor` as a GitHub owners validator, do the following:
+
+1. Create a secret string value.
+2. Configure the `GitHub` webhook with that value.
+3. Create a Kubernetes secret containing your secret value called `SecretRef`.
+4. Pass the Kubernetes secret as a reference to your GitHub `Interceptor`.
+5. Create an owners file and add the list of approvers into the approvers section.
+
+Below is an example GitHub `Interceptor` using owners validation:
+
+```yaml
+ triggers:
+    - name: github-listener
+      interceptors:
+        - ref:
+            name: "github"
+            kind: ClusterInterceptor
+            apiVersion: triggers.tekton.dev
+          params:
+            - name: "secretRef"
+              value:
+                secretName: github-secret
+                secretKey: secretToken
+            - name: "eventTypes"
+              # Owners validation requires (at a minimum) the `pull_request` and `issue_comment` GitHub event types
+              value: ["pull_request", "issue_comment"]
+            - name: "githubOwners"
+              value: 
+                enabled: true
+                # This value is needed for private repos or when checkType is set to orgMembers or repoMembers or all
+                # personalAccessToken:
+                #   secretName: github-token
+                #   secretKey: secretToken
+                checkType: none
+```
+
+For more information around owners file validation, see the following example
+
+- [github-owners](../examples/v1beta1/github-owners)
 
 ### GitLab Interceptors
 
@@ -242,10 +365,12 @@ spec:
 
 ### Bitbucket `Interceptors`
 
-A Bitbucket `Interceptor` contains logic that validates and filters [Bitbucket server](https://confluence.atlassian.com/bitbucketserver) webhooks.
-It can validate the webhook's origin as described in [Webhooks](https://docs.gitlab.com/ee/user/project/integrations/webhooks.html). It does
-not support [Bitbucket cloud](https://support.atlassian.com/bitbucket-cloud/) due to lack of support for validating secrets; if you need this
-functionality with Bitbucket, use a [CEL `Interceptor`](#cel-interceptors) instead. The Bitbucket `Interceptor` always preserves  the payload
+Bitbucket `Interceptors` has support for both Bitbucket server (which does secret validation and event filtering) and Bitbucket cloud (which does event filtering).
+
+### Bitbucket Server
+
+A Bitbucket server contains logic that validates and filters [Bitbucket server](https://confluence.atlassian.com/bitbucketserver) webhooks.
+It can validate the webhook's origin as described in [Webhooks](https://docs.gitlab.com/ee/user/project/integrations/webhooks.html). The Bitbucket `Interceptor` always preserves the payload
 data (both header and body) in its responses.
 
 To use a Bitbucket `Interceptor` as a Bitbucket server webhook validator, do the following:
@@ -259,7 +384,7 @@ To use a Bitbucket `Interceptor` as a filter for event data, specify the event t
 you want the `Interceptor` to accept in the `eventTypes` field. The `Interceptor`
 accepts data event types listed in [Event payload](https://confluence.atlassian.com/bitbucketserver/event-payload-938025882.html).
 
-Below is an example Bitbucket `Interceptor` reference:
+Below is an example Bitbucket `Interceptor` reference for server:
 
 ```yaml
 interceptors:
@@ -268,7 +393,7 @@ interceptors:
   params:
     - name: secretRef
       value:
-        secretName: bitbucket-secret
+        secretName: bitbucket-server-secret
         secretKey: secretToken
     - name: eventTypes
       value:
@@ -282,32 +407,110 @@ For reference, below is an example legacy Bitbucket `Interceptor` definition:
 apiVersion: triggers.tekton.dev/v1alpha1
 kind: EventListener
 metadata:
-  name: bitbucket-listener
+  name: bitbucket-server-listener
 spec:
   serviceAccountName: tekton-triggers-example-sa
   triggers:
-    - name: bitbucket-triggers
+    - name: bitbucket-server-triggers
       interceptors:
         - ref:
             name: "bitbucket"
           params:
             - name: secretRef
               value:
-                secretName: bitbucket-secret
+                secretName: bitbucket-server-secret
                 secretKey: secretToken
             - name: eventTypes
               value:
                 - repo:refs_changed
       bindings:
-        - ref: bitbucket-binding
+        - ref: bitbucket-server-binding
       template:
-        ref: bitbucket-template
+        ref: bitbucket-server-template
 ```
+
+### Bitbucket Cloud
+
+At the moment, Bitbucket cloud does not support validating webhook payloads using shared secrets. 
+See the [Secure Webhooks section](https://support.atlassian.com/bitbucket-cloud/docs/manage-webhooks/) of Bitbucket cloud docs for more information on securing your Bitbucket webhooks.
+
+To use a Bitbucket `Interceptor` as a filter for event data, specify the event types
+you want the `Interceptor` to accept in the `eventTypes` field. The `Interceptor`
+accepts data event types listed in [Event payload](https://support.atlassian.com/bitbucket-cloud/docs/event-payloads/).
+
+Below is an example Bitbucket `Interceptor` reference for cloud:
+
+```yaml
+interceptors:
+- ref:
+    name: "bitbucket"
+  params:
+    - name: eventTypes
+      value:
+        - repo:push
+```
+
+For reference, below is an example legacy Bitbucket `Interceptor` definition:
+
+```yaml
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: bitbucket-cloud-listener
+spec:
+  serviceAccountName: tekton-triggers-example-sa
+  triggers:
+    - name: bitbucket-cloud-triggers
+      interceptors:
+        - ref:
+            name: "bitbucket"
+          params:
+            - name: eventTypes
+              value:
+                - repo:push
+      bindings:
+        - ref: bitbucket-cloud-binding
+      template:
+        ref: bitbucket-cloud-template
+```
+
+### Slack Interceptors
+A Slack `Interceptor` allows you to extract fields from a slack slash command [payload](https://api.slack.com/interactivity/slash-commands#app_command_handling) which are sent in the  http form-data section. 
+the `Interceptor` requests fields extracts the requested fields and appends them to the `extensions`. 
+
+
+```yaml
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: slack-listener
+  annotations:
+    tekton.dev/payload-validation: "false"
+spec:
+  triggers:
+    - name: slack-trigger
+      interceptors:
+        - ref:
+            name: "slack"
+            kind: ClusterInterceptor
+          params:
+            - name: requestedFields
+              value: 
+                - text   
+```
+Note: payload-validation must be disabled by add adding the following annotation 
+
+```yaml
+  annotations:
+    tekton.dev/payload-validation: "false"
+```
+
 
 ### CEL Interceptors
 
 A CEL `Interceptor` allows you to filter and modify the payloads of incoming events using
-the [CEL]https://github.com/google/cel-spec/blob/master/doc/langdef.md) expression language.
+the [CEL](https://github.com/google/cel-spec/blob/master/doc/langdef.md) expression language.
 
 CEL `Interceptors` support `overlays`, which are CEL expressions that Tekton Triggers adds
 to the event payload in the top-level `extensions` field. `overlays` are accessible from
@@ -462,12 +665,19 @@ spec:
 
 ### Chaining `Interceptors`
 
-**Note:** This section documents the current behavior for passing data between interceptors. New behavior is currently being implemented in [PR 271](https://github.com/tektoncd/triggers/issues/271).
-
 You can chain `Interceptors` with the following constraints:
 
-- CEL `Interceptors` do not modify the body of the event payload; instead, they add extra fields to the top-level `extensions` field.
+- `ClusterInterceptors` do not modify the body of the event payload; instead, they add extra fields to the top-level `extensions` field.
+
 - Webhook `Interceptors` can modify the body of the event payload, but cannot access the top-level `extensions` field.
+
+#### Chaining ClusterInterceptors
+
+Each ClusterInterceptor can return values in the InterceptorResponse within the `extensions` field. These values are then added to the `extensions` field of the InterceptorRequest that is sent to the next interceptor in the chain. 
+
+If two interceptors return an extensions field with the same name, the latter one will overwrite the one from the previous one i.e. if interceptors A and B both return `foo` in the Extensions field of the InterceptorResponse, the values written by B will overwrite the ones written by A. To prevent this, it is recommended that each cluster interceptor write to its own top level field i.e A returns `A.foo` and B return `B.foo` in the InterceptorResponse.
+
+#### Chaining Webhook Interceptors
 
 **Note:** We are working on changing the behavior of Webhook `Interceptors` to match that of CEL `Interceptors` so that both `Interceptor` types can share data via the top-level `extensions` field.
 
@@ -506,4 +716,4 @@ field both in the body of the payload as well as via the extra fields added to t
 
 ## Implementing custom `Interceptors`
 
-Tekton Triggers ships with the `ClusterInterceptor` Custom Resource Definition (CRD), which you can use to implement custom `Interceptors`. See [`ClusterInterceptors`](./clusterinterceptors.md) for more information.
+Tekton Triggers ships with the `ClusterInterceptor`and `Interceptor` Custom Resource Definition (CRD), which you can use to implement custom `Interceptors`. See [`ClusterInterceptors`](./clusterinterceptors.md) and [`NamespacedInterceptors`](./namespacedinterceptors.md)  for more information.

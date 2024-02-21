@@ -19,17 +19,21 @@ package eventlistener
 import (
 	"context"
 
-	"github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
+	cfg "github.com/tektoncd/triggers/pkg/apis/config"
+	"github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
 	triggersclient "github.com/tektoncd/triggers/pkg/client/injection/client"
-	eventlistenerinformer "github.com/tektoncd/triggers/pkg/client/injection/informers/triggers/v1alpha1/eventlistener"
-	eventlistenerreconciler "github.com/tektoncd/triggers/pkg/client/injection/reconciler/triggers/v1alpha1/eventlistener"
+	eventlistenerinformer "github.com/tektoncd/triggers/pkg/client/injection/informers/triggers/v1beta1/eventlistener"
+	eventlistenerreconciler "github.com/tektoncd/triggers/pkg/client/injection/reconciler/triggers/v1beta1/eventlistener"
 	dynamicduck "github.com/tektoncd/triggers/pkg/dynamic"
+	"github.com/tektoncd/triggers/pkg/reconciler/eventlistener/resources"
+	"github.com/tektoncd/triggers/pkg/reconciler/metrics"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/cache"
+	reconcilersource "knative.dev/eventing/pkg/reconciler/source"
 	duckinformer "knative.dev/pkg/client/injection/ducks/duck/v1/podspecable"
 	kubeclient "knative.dev/pkg/client/injection/kube/client"
-	deployinformer "knative.dev/pkg/client/injection/kube/informers/apps/v1/deployment"
-	configmapinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/configmap"
-	serviceinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/service"
+	filtereddeployinformer "knative.dev/pkg/client/injection/kube/informers/apps/v1/deployment/filtered"
+	filteredserviceinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/service/filtered"
 	"knative.dev/pkg/configmap"
 	"knative.dev/pkg/controller"
 	"knative.dev/pkg/injection/clients/dynamicclient"
@@ -37,53 +41,55 @@ import (
 )
 
 // NewController creates a new instance of an EventListener controller.
-func NewController(config Config) func(context.Context, configmap.Watcher) *controller.Impl {
+func NewController(config resources.Config) func(context.Context, configmap.Watcher) *controller.Impl {
 	return func(ctx context.Context, cmw configmap.Watcher) *controller.Impl {
 		logger := logging.FromContext(ctx)
 		dynamicclientset := dynamicclient.Get(ctx)
 		kubeclientset := kubeclient.Get(ctx)
 		triggersclientset := triggersclient.Get(ctx)
 		eventListenerInformer := eventlistenerinformer.Get(ctx)
-		deploymentInformer := deployinformer.Get(ctx)
-		serviceInformer := serviceinformer.Get(ctx)
+		deploymentInformer := filtereddeployinformer.Get(ctx, labels.FormatLabels(resources.DefaultStaticResourceLabels))
+		serviceInformer := filteredserviceinformer.Get(ctx, labels.FormatLabels(resources.DefaultStaticResourceLabels))
 
 		reconciler := &Reconciler{
-			DynamicClientSet:    dynamicclientset,
-			KubeClientSet:       kubeclientset,
-			TriggersClientSet:   triggersclientset,
-			configmapLister:     configmapinformer.Get(ctx).Lister(),
-			deploymentLister:    deploymentInformer.Lister(),
-			eventListenerLister: eventListenerInformer.Lister(),
-			serviceLister:       serviceInformer.Lister(),
-
-			config: config,
+			DynamicClientSet:  dynamicclientset,
+			KubeClientSet:     kubeclientset,
+			TriggersClientSet: triggersclientset,
+			deploymentLister:  deploymentInformer.Lister(),
+			serviceLister:     serviceInformer.Lister(),
+			configAcc:         reconcilersource.WatchConfigurations(ctx, "eventlistener", cmw),
+			config:            config,
+			Metrics:           metrics.Get(ctx),
 		}
 
 		impl := eventlistenerreconciler.NewImpl(ctx, reconciler, func(impl *controller.Impl) controller.Options {
+			configStore := cfg.NewStore(logger.Named("config-store"))
+			configStore.WatchConfigs(cmw)
 			return controller.Options{
-				AgentName: ControllerName,
+				AgentName:   ControllerName,
+				ConfigStore: configStore,
 			}
 		})
 
-		logger.Info("Setting up event handlers")
-
 		reconciler.podspecableTracker = dynamicduck.NewListableTracker(ctx, duckinformer.Get, impl)
 
-		eventListenerInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-			AddFunc:    impl.Enqueue,
-			UpdateFunc: controller.PassNew(impl.Enqueue),
-			DeleteFunc: impl.Enqueue,
-		})
+		if _, err := eventListenerInformer.Informer().AddEventHandler(controller.HandleAll(impl.Enqueue)); err != nil {
+			logging.FromContext(ctx).Panicf("Couldn't register EventListener informer event handler: %w", err)
+		}
 
-		deploymentInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
-			FilterFunc: controller.FilterControllerGVK(v1alpha1.SchemeGroupVersion.WithKind("EventListener")),
+		if _, err := deploymentInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
+			FilterFunc: controller.FilterController(&v1beta1.EventListener{}),
 			Handler:    controller.HandleAll(impl.EnqueueControllerOf),
-		})
+		}); err != nil {
+			logging.FromContext(ctx).Panicf("Couldn't register Deployment informer event handler: %w", err)
+		}
 
-		serviceInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
-			FilterFunc: controller.FilterControllerGVK(v1alpha1.SchemeGroupVersion.WithKind("EventListener")),
+		if _, err := serviceInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
+			FilterFunc: controller.FilterController(&v1beta1.EventListener{}),
 			Handler:    controller.HandleAll(impl.EnqueueControllerOf),
-		})
+		}); err != nil {
+			logging.FromContext(ctx).Panicf("Couldn't register Service informer event handler: %w", err)
+		}
 
 		return impl
 	}

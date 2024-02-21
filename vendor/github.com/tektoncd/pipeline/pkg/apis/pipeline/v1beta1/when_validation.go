@@ -17,10 +17,12 @@ limitations under the License.
 package v1beta1
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
-	"github.com/tektoncd/pipeline/pkg/substitution"
+	"github.com/google/cel-go/cel"
+	"github.com/tektoncd/pipeline/pkg/apis/config"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -32,19 +34,39 @@ var validWhenOperators = []string{
 	string(selection.NotIn),
 }
 
-func (wes WhenExpressions) validate() *apis.FieldError {
-	errs := wes.validateWhenExpressionsFields().ViaField("when")
-	return errs.Also(wes.validateTaskResultsVariables().ViaField("when"))
+func (wes WhenExpressions) validate(ctx context.Context) *apis.FieldError {
+	return wes.validateWhenExpressionsFields(ctx).ViaField("when")
 }
 
-func (wes WhenExpressions) validateWhenExpressionsFields() (errs *apis.FieldError) {
+func (wes WhenExpressions) validateWhenExpressionsFields(ctx context.Context) (errs *apis.FieldError) {
 	for idx, we := range wes {
-		errs = errs.Also(we.validateWhenExpressionFields().ViaIndex(idx))
+		errs = errs.Also(we.validateWhenExpressionFields(ctx).ViaIndex(idx))
 	}
 	return errs
 }
 
-func (we *WhenExpression) validateWhenExpressionFields() *apis.FieldError {
+func (we *WhenExpression) validateWhenExpressionFields(ctx context.Context) *apis.FieldError {
+	if we.CEL != "" {
+		if !config.FromContextOrDefaults(ctx).FeatureFlags.EnableCELInWhenExpression {
+			return apis.ErrGeneric("feature flag %s should be set to true to use CEL: %s in WhenExpression", config.EnableCELInWhenExpression, we.CEL)
+		}
+		if we.Input != "" || we.Operator != "" || len(we.Values) != 0 {
+			return apis.ErrGeneric(fmt.Sprintf("cel and input+operator+values cannot be set in one WhenExpression: %v", we))
+		}
+		// We need to compile the CEL expression and check if it is a valid expression
+		// note that at the validation webhook, Tekton's variables are not substituted,
+		// so they need to be wrapped with single quotes.
+		// e.g.  This is a valid CEL expression: '$(params.foo)' == 'foo';
+		//       But this is not a valid expression since CEL cannot recognize: $(params.foo) == 'foo';
+		//       This is not valid since we don't pass params to CEL's environment: params.foo == 'foo';
+		env, _ := cel.NewEnv()
+		_, iss := env.Compile(we.CEL)
+		if iss.Err() != nil {
+			return apis.ErrGeneric("invalid cel expression: %s with err: %s", we.CEL, iss.Err().Error())
+		}
+		return nil
+	}
+
 	if equality.Semantic.DeepEqual(we, &WhenExpression{}) || we == nil {
 		return apis.ErrMissingField(apis.CurrentField)
 	}
@@ -58,33 +80,19 @@ func (we *WhenExpression) validateWhenExpressionFields() *apis.FieldError {
 	return nil
 }
 
-func (wes WhenExpressions) validateTaskResultsVariables() *apis.FieldError {
+func (wes WhenExpressions) validatePipelineParametersVariables(prefix string, paramNames sets.String, arrayParamNames sets.String, objectParamNameKeys map[string][]string) (errs *apis.FieldError) {
 	for idx, we := range wes {
-		expressions, ok := we.GetVarSubstitutionExpressions()
-		if ok {
-			if LooksLikeContainsResultRefs(expressions) {
-				expressions = filter(expressions, looksLikeResultRef)
-				resultRefs := NewResultRefs(expressions)
-				if len(expressions) != len(resultRefs) {
-					message := fmt.Sprintf("expected all of the expressions %v to be result expressions but only %v were", expressions, resultRefs)
-					return apis.ErrInvalidValue(message, apis.CurrentField).ViaIndex(idx)
-				}
+		errs = errs.Also(validateStringVariable(we.Input, prefix, paramNames, arrayParamNames, objectParamNameKeys).ViaField("input").ViaFieldIndex("when", idx))
+		for _, val := range we.Values {
+			// one of the values could be a reference to an array param, such as, $(params.foo[*])
+			// extract the variable name from the pattern $(params.foo[*]), if the variable name matches with one of the array params
+			// validate the param as an array variable otherwise, validate it as a string variable
+			if arrayParamNames.Has(ArrayReference(val)) {
+				errs = errs.Also(validateArrayVariable(val, prefix, paramNames, arrayParamNames, objectParamNameKeys).ViaField("values").ViaFieldIndex("when", idx))
+			} else {
+				errs = errs.Also(validateStringVariable(val, prefix, paramNames, arrayParamNames, objectParamNameKeys).ViaField("values").ViaFieldIndex("when", idx))
 			}
 		}
 	}
-	return nil
-}
-
-func (wes WhenExpressions) validatePipelineParametersVariables(prefix string, paramNames sets.String, arrayParamNames sets.String) (errs *apis.FieldError) {
-	for idx, we := range wes {
-		errs = errs.Also(validateStringVariable(we.Input, prefix, paramNames, arrayParamNames).ViaField("input").ViaFieldIndex("when", idx))
-		for _, val := range we.Values {
-			errs = errs.Also(validateStringVariable(val, prefix, paramNames, arrayParamNames).ViaField("values").ViaFieldIndex("when", idx))
-		}
-	}
 	return errs
-}
-func validateStringVariable(value, prefix string, stringVars sets.String, arrayVars sets.String) *apis.FieldError {
-	errs := substitution.ValidateVariableP(value, prefix, stringVars)
-	return errs.Also(substitution.ValidateVariableProhibitedP(value, prefix, arrayVars))
 }
